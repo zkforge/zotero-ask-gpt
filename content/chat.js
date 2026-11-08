@@ -12,7 +12,9 @@ let hasQuote = false;
 const ICONS = {
   copy: '<rect x="5.5" y="5.5" width="7" height="7" rx="1.5"/><path d="M10.5 5.5V4.5A1 1 0 0 0 9.5 3.5h-5a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h1"/>',
   check: '<path d="M3.5 8.5l3 3 6-7"/>',
-  note: '<path d="M4.5 2.5h5l2.5 2.5v8.5h-7.5z"/><path d="M6.5 7.5h3.5M6.5 10h3.5"/>'
+  note: '<path d="M4.5 2.5h5l2.5 2.5v8.5h-7.5z"/><path d="M6.5 7.5h3.5M6.5 10h3.5"/>',
+  retry: '<path d="M12.8 6.5A5 5 0 1 0 13 9.2"/><path d="M13 3v3.5H9.5"/>',
+  edit: '<path d="M10.5 3.5l2 2-6.5 6.5H4v-2z"/><path d="M9 5l2 2"/>'
 };
 const icon = (name, className = '') => `<svg class="${className}" viewBox="0 0 16 16" aria-hidden="true">${ICONS[name]}</svg>`;
 const SUGGESTIONS = ['总结这篇论文的问题、方法和结论', '这篇论文的主要贡献是什么？', '这篇论文有哪些局限？'];
@@ -56,8 +58,43 @@ function quoteBlock(quote) {
   return block;
 }
 
-function messageNode(message, index) {
+function actionButton(iconName, label, title, onClick) {
+  const button = element('button');
+  button.innerHTML = `${icon(iconName)}<span>${label}</span>`;
+  button.title = title;
+  button.addEventListener('click', () => onClick(button));
+  return button;
+}
+
+// Swap the question text for an inline editor; sending re-asks it on a fresh thread.
+function startEdit(node, message) {
+  const text = node.querySelector('.bubble > .text');
+  const box = element('textarea', 'edit-box');
+  box.value = message.text;
+  const cancel = element('button', '', '取消');
+  const save = element('button', 'primary-action', '发送');
+  const actions = element('div', 'edit-actions');
+  actions.append(cancel, save);
+  const finish = () => { renderedMessages.delete(message); window.render(lastConv); };
+  cancel.addEventListener('click', finish);
+  save.addEventListener('click', () => window.host?.rerun(box.value));
+  box.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); save.click(); }
+    else if (event.key === 'Escape') { event.preventDefault(); finish(); }
+  });
+  text.replaceWith(box, actions);
+  node.classList.add('editing');
+  node.querySelector(':scope > .actions')?.remove();
+  box.style.height = Math.min(box.scrollHeight, 220) + 'px';
+  box.focus();
+  box.setSelectionRange(box.value.length, box.value.length);
+}
+
+// `last` marks the final question/answer pair, which can be edited or regenerated when idle.
+function messageNode(message, index, last) {
   const node = element('div', `msg ${message.role}${message.pending ? ' pending' : ''}`);
+  const content = message.role === 'user' ? element('div', 'bubble') : node;
+  if (content !== node) node.append(content);
   if (message.images?.length) {
     const grid = element('div', message.images.length === 1 ? 'msg-images single' : 'msg-images');
     for (const item of message.images) {
@@ -69,9 +106,9 @@ function messageNode(message, index) {
       image.addEventListener('click', () => locateFrom(image));
       grid.append(image);
     }
-    node.append(grid);
+    content.append(grid);
   }
-  if (message.quote) node.append(quoteBlock(message.quote));
+  if (message.quote) content.append(quoteBlock(message.quote));
   if (message.role === 'assistant') {
     if (message.text) {
       const body = element('div', 'markdown');
@@ -81,37 +118,64 @@ function messageNode(message, index) {
     } else if (message.pending) {
       node.append(element('span', 'thinking', '思考中…'));
     }
+    const actions = element('div', 'actions');
     if (!message.pending && message.text) {
-      const actions = element('div', 'actions');
-      const copy = element('button');
-      copy.innerHTML = `${icon('copy')}<span>复制</span>`;
-      copy.addEventListener('click', () => {
+      actions.append(actionButton('copy', '复制', '复制回答', button => {
         navigator.clipboard.writeText(message.text);
-        copy.innerHTML = `${icon('check')}<span>已复制</span>`;
-        setTimeout(() => { copy.innerHTML = `${icon('copy')}<span>复制</span>`; }, 1200);
-      });
-      const note = element('button');
-      note.innerHTML = `${icon('note')}<span>${message.note ? '查看笔记' : '存为笔记'}</span>`;
-      note.title = message.note ? '在新窗口打开这条笔记' : '把这轮问答存为这篇论文的子笔记';
-      note.addEventListener('click', () => {
-        if (message.note) window.host?.openNote(index);
-        else {
+        button.innerHTML = `${icon('check')}<span>已复制</span>`;
+        setTimeout(() => { button.innerHTML = `${icon('copy')}<span>复制</span>`; }, 1200);
+      }));
+      actions.append(actionButton('note', message.note ? '查看笔记' : '存为笔记',
+        message.note ? '在新窗口打开这条笔记' : '把这轮问答存为这篇论文的子笔记', button => {
+          if (message.note) { window.host?.openNote(index); return; }
           // On success this node is replaced; on failure the button must come back.
-          note.disabled = true;
-          Promise.resolve(window.host?.saveNote(index, buildNote(lastConv, index, currentModel()?.name || picker.model, new Date().toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' })))).finally(() => { note.disabled = false; });
-        }
-      });
-      actions.append(copy, note);
+          button.disabled = true;
+          const stamp = new Date().toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
+          Promise.resolve(window.host?.saveNote(index, buildNote(lastConv, index, currentModel()?.name || picker.model, stamp)))
+            .finally(() => { button.disabled = false; });
+        }));
+    }
+    if (last && !message.pending) actions.append(actionButton('retry', '重新生成', '用同一个问题重新回答', () => window.host?.rerun()));
+    if (actions.children.length) node.append(actions);
+  } else {
+    content.append(element('span', 'text', message.text));
+    if (last) {
+      const actions = element('div', 'actions');
+      actions.append(actionButton('edit', '编辑', '修改这个问题后重新发送', () => startEdit(node, message)));
       node.append(actions);
     }
-  } else {
-    node.append(element('span', 'text', message.text));
   }
   if (message.error) {
     const error = element('span', message.error === '已停止' ? 'error stopped' : 'error', message.error);
     node.insertBefore(error, node.querySelector('.actions'));
   }
   return node;
+}
+
+// Short status items under the title: how much of the paper the model has, and how full the
+// context was on the last request (an estimate of the paper's size before the first one).
+function statusChips(conv) {
+  const chip = (text, kind = '', title = '') => {
+    const node = element('span', `chip ${kind}`.trim(), text);
+    if (title) node.title = title;
+    return node;
+  };
+  const tokens = n => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+  const { state, pages, readPages } = conv.status || {};
+  const chips = [];
+  if (state === 'loading') chips.push(chip('读取全文…', 'loading'));
+  else if (state === 'full') chips.push(chip(`${pages} 页`, '', 'AI 已读取全文'));
+  else if (state === 'truncated') chips.push(chip(`已读 ${readPages}/${pages} 页`, 'warn', '论文太长，后面的页没有放进上下文'));
+  else if (state === 'scanned') chips.push(chip('无可提取文字', 'warn', '可能是扫描件，AI 只能看到题录信息'));
+  else if (state === 'failed') chips.push(chip('全文读取失败', 'warn', 'AI 只能看到题录信息'));
+  if (conv.usage?.window) {
+    const percent = Math.round(conv.usage.used / conv.usage.window * 100);
+    chips.push(chip(`上下文 ${percent}%`, percent >= 80 ? 'warn' : '',
+      `上一次请求约用了 ${tokens(conv.usage.used)} / ${tokens(conv.usage.window)} tokens${percent >= 80 ? '，快满了，可以开新对话' : ''}`));
+  } else if (conv.paperTokens && state !== 'loading') {
+    chips.push(chip(`约 ${tokens(conv.paperTokens)} tokens`, '', '论文放进上下文后的估计大小'));
+  }
+  return chips;
 }
 
 function greeting() {
@@ -126,9 +190,7 @@ window.render = conv => {
   lastConv = conv;
   $('title').textContent = conv.title;
   $('title').title = conv.title;
-  $('notice-text').textContent = conv.notice || '';
-  if (conv.notice) $('notice').dataset.level = conv.noticeLevel || 'ok';
-  else delete $('notice').dataset.level;
+  $('status').replaceChildren(...statusChips(conv));
   busy = conv.busy;
   send.classList.toggle('stop', busy);
   send.title = busy ? '停止生成' : '发送';
@@ -188,11 +250,13 @@ window.render = conv => {
   } else {
     // Rebuild only messages whose visible content changed — while streaming that is just
     // the reply being written — and patch the list in place so other nodes stay put.
+    const lastUser = conv.messages.map(m => m.role).lastIndexOf('user');
     const nodes = conv.messages.map((message, i) => {
-      const signature = JSON.stringify([i, message.text, message.pending, message.error, message.note, message.quote, message.images]);
+      const last = !conv.busy && i >= lastUser;
+      const signature = JSON.stringify([i, last, message.text, message.pending, message.error, message.note, message.quote, message.images]);
       const cached = renderedMessages.get(message);
       if (cached?.signature === signature) return cached.node;
-      const node = messageNode(message, i);
+      const node = messageNode(message, i, last);
       renderedMessages.set(message, { signature, node });
       return node;
     });
@@ -344,6 +408,7 @@ $('capture').addEventListener('click', () => window.host?.capture());
 for (const button of document.querySelectorAll('[data-prompt]'))
   button.addEventListener('click', () => submit(button.dataset.prompt));
 $('reset').addEventListener('click', () => window.host?.reset());
+$('settings').addEventListener('click', () => window.host?.openSettings());
 $('close').addEventListener('click', () => window.host?.close());
 window.addEventListener('error', event => window.host?.logError(event.error || event.message));
 autosize();

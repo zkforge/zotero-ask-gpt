@@ -69,6 +69,10 @@ var AIChatAddon = class {
 
   // Settings pane support -------------------------------------------------------
 
+  async openSettings() {
+    Zotero.Utilities.Internal.openPreferences(await this.prefPaneID);
+  }
+
   defaultInstructions() {
     return CodexService.BASE_INSTRUCTIONS;
   }
@@ -406,7 +410,7 @@ var AIChatAddon = class {
     if (!conv) {
       const item = Zotero.Items.get(itemID);
       const parent = item?.parentItem || item;
-      conv = { itemID, title: parent?.getDisplayTitle() || '未命名文献', threadId: null, turnId: null, busy: false, messages: [], quote: null, notice: '正在读取全文…', noticeLevel: 'loading', instructions: '' };
+      conv = { itemID, title: parent?.getDisplayTitle() || '未命名文献', threadId: null, turnId: null, busy: false, messages: [], quote: null, notice: '正在读取全文…', noticeLevel: 'loading', status: { state: 'loading' }, instructions: '' };
       this.conversations.set(itemID, conv);
       conv.contextReady = this.loadContext(conv);
       conv.restored = this.restore(conv);
@@ -488,27 +492,35 @@ var AIChatAddon = class {
       if (!text.trim()) {
         conv.notice = '没有可提取的文字（可能是扫描件）';
         conv.noticeLevel = 'warn';
+        conv.status = { state: 'scanned', pages: pages.length };
       } else {
         body = pages.map((page, i) => `[p.${i + 1}]\n${page.trim()}`).join('\n\n');
         conv.pageCount = pages.length;
         conv.notice = `已读取全文 · ${pages.length} 页`;
         conv.noticeLevel = 'ok';
+        conv.status = { state: 'full', pages: pages.length };
         if (body.length > AIChatAddon.MAX_CONTEXT_CHARS) {
           body = body.slice(0, AIChatAddon.MAX_CONTEXT_CHARS);
           const lastPage = [...body.matchAll(/^\[p\.(\d+)\]$/gm)].pop()?.[1];
           body += `\n\n[Full text truncated after p.${lastPage}; later pages are not available.]`;
           conv.notice = `篇幅过长，已读取前 ${lastPage} / ${pages.length} 页`;
           conv.noticeLevel = 'warn';
+          conv.status = { state: 'truncated', pages: pages.length, readPages: Number(lastPage) };
         }
       }
     } catch (error) {
       Zotero.logError(error);
       conv.notice = '未能提取全文，仅有题录信息';
       conv.noticeLevel = 'warn';
+      conv.status = { state: 'failed' };
     }
     conv.instructions = body
       ? `${header}\n\nFull text of the PDF, with [p.N] marking the start of PDF page N:\n\n${body}`
       : header;
+    // Rough size for the status line until codex reports real usage: CJK characters count
+    // about one token each, other text about four characters per token.
+    const cjk = (conv.instructions.match(/[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]/g) || []).length;
+    conv.paperTokens = Math.round(cjk + (conv.instructions.length - cjk) / 4);
     this.changed(conv);
   }
 
@@ -525,10 +537,29 @@ var AIChatAddon = class {
       : images.length ? '解释这张图（或表格、公式）的含义。' : quote ? '解释这段文字。' : '');
     if (conv.busy || !text) return;
     Zotero.debug(`[zoteroaichat] send for item ${itemID}`);
-    const history = conv.threadId ? [] : conv.messages.map(m => ({ role: m.role, text: m.role === 'user' ? this.promptFor(m, { replay: true }) : m.text }));
-    const message = { role: 'user', text, quote, images };
     conv.quote = null;
     conv.images = [];
+    await this.ask(conv, { role: 'user', text, quote, images });
+  }
+
+  // Ask the last question again, or an edited version of it, on a fresh thread whose replayed
+  // history stops before that question, so the model never sees the answer being replaced.
+  async rerun(itemID, editedText = null) {
+    const conv = this.conversations.get(itemID);
+    if (!conv || conv.busy) return;
+    const index = conv.messages.map(m => m.role).lastIndexOf('user');
+    if (index < 0) return;
+    const question = conv.messages[index];
+    conv.messages = conv.messages.slice(0, index);
+    conv.threadId = null;
+    await this.ask(conv, editedText?.trim() ? { ...question, text: editedText.trim() } : question);
+  }
+
+  // Run one question: append it with a pending reply, start a thread if there is none
+  // (replaying the earlier messages into it), then start the turn.
+  async ask(conv, message) {
+    const history = conv.threadId ? [] : conv.messages.map(m => ({ role: m.role, text: m.role === 'user' ? this.promptFor(m, { replay: true }) : m.text }));
+    const images = message.images || [];
     conv.messages.push(message);
     conv.messages.push({ role: 'assistant', text: '', pending: true });
     conv.busy = true;
@@ -600,7 +631,11 @@ var AIChatAddon = class {
   onEvent(conv, { method, params }) {
     if (this.conversations.get(conv.itemID) !== conv) return;
     const reply = conv.messages[conv.messages.length - 1];
-    if (method === 'item/agentMessage/delta' && reply?.pending) {
+    if (method === 'thread/tokenUsage/updated') {
+      // `last` is the latest request: everything the model saw plus its reply.
+      conv.usage = { used: params.tokenUsage.last.totalTokens, window: params.tokenUsage.modelContextWindow };
+      this.changed(conv);
+    } else if (method === 'item/agentMessage/delta' && reply?.pending) {
       if (reply.itemId && reply.itemId !== params.itemId && reply.text) reply.text += '\n\n';
       reply.itemId = params.itemId;
       reply.text += params.delta;

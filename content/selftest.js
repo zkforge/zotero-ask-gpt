@@ -9,6 +9,18 @@ async function runSelfTest(addon) {
       reader = addon.currentReader(Zotero.getMainWindow());
       if (!reader) await Zotero.Promise.delay(500);
     }
+    // With no PDF open, open the attachment named by extensions.zoteroaichat.devSelfTestItem
+    // ("<libraryID>/<key>").
+    const fallback = Zotero.Prefs.get('extensions.zoteroaichat.devSelfTestItem', true);
+    if (!reader && fallback) {
+      const [libraryID, key] = fallback.split('/');
+      const item = Zotero.Items.getByLibraryAndKey(Number(libraryID), key);
+      Zotero.debug(`[zoteroaichat] self-test opening fallback ${fallback}: item=${item?.id}`);
+      if (item) reader = await Zotero.Reader.open(item.id);
+      Zotero.debug(`[zoteroaichat] self-test fallback reader=${!!reader} current=${!!addon.currentReader(Zotero.getMainWindow())}`);
+      reader ||= addon.currentReader(Zotero.getMainWindow());
+      await reader?._initPromise;
+    }
     if (!reader) throw new Error('no reader tab open');
     const conv = addon.conversation(reader.itemID);
     await Promise.all([conv.contextReady, conv.restored]);
@@ -19,6 +31,28 @@ async function runSelfTest(addon) {
     await Zotero.Promise.delay(1000);
     Zotero.debug(`[zoteroaichat] self-test navigate: asked p.5, reader at pageIndex ${reader._internalReader?._state?.primaryViewStats?.pageIndex}`);
     const mode = Zotero.Prefs.get('extensions.zoteroaichat.devSelfTest', true);
+    if (mode === 'rerun') {
+      // Ask, regenerate, then edit the question; each rerun must replace the last pair.
+      // The test exchange is removed afterwards.
+      const before = conv.messages.length;
+      const idle = async () => { while (conv.busy) await Zotero.Promise.delay(200); };
+      const chips = () => [...[...addon.sidebars.values()][0]?.chat?.document.querySelectorAll('.chip') || []].map(c => c.textContent).join(' | ');
+      await addon.send(reader.itemID, 'Self-test: name one random colour, one word only.');
+      await idle();
+      const first = conv.messages.at(-1).text;
+      Zotero.debug(`[zoteroaichat] self-test rerun ask: "${first}", messages +${conv.messages.length - before}, usage=${JSON.stringify(conv.usage)}`);
+      await addon.rerun(reader.itemID);
+      await idle();
+      Zotero.debug(`[zoteroaichat] self-test rerun regenerate: "${conv.messages.at(-1).text}", messages +${conv.messages.length - before}, question kept=${conv.messages.at(-2).text.includes('random colour')}`);
+      await addon.rerun(reader.itemID, 'Self-test: name one random animal, one word only.');
+      await idle();
+      await Zotero.Promise.delay(300);
+      Zotero.debug(`[zoteroaichat] self-test rerun edit: "${conv.messages.at(-1).text}", messages +${conv.messages.length - before}, question=${JSON.stringify(conv.messages.at(-2).text)}, chips="${chips()}"`);
+      conv.messages.splice(before);
+      addon.changed(conv);
+      await addon.save(conv);
+      return;
+    }
     if (mode === 'prefs') {
       // Open the settings pane, log what it shows, press "test connection", then close it.
       const win = Zotero.Utilities.Internal.openPreferences(await addon.prefPaneID);

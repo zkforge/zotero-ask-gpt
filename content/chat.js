@@ -11,7 +11,8 @@ let hasQuote = false;
 
 const ICONS = {
   copy: '<rect x="5.5" y="5.5" width="7" height="7" rx="1.5"/><path d="M10.5 5.5V4.5A1 1 0 0 0 9.5 3.5h-5a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h1"/>',
-  check: '<path d="M3.5 8.5l3 3 6-7"/>'
+  check: '<path d="M3.5 8.5l3 3 6-7"/>',
+  note: '<path d="M4.5 2.5h5l2.5 2.5v8.5h-7.5z"/><path d="M6.5 7.5h3.5M6.5 10h3.5"/>'
 };
 const icon = (name, className = '') => `<svg class="${className}" viewBox="0 0 16 16" aria-hidden="true">${ICONS[name]}</svg>`;
 const SUGGESTIONS = ['总结这篇论文的问题、方法和结论', '这篇论文的主要贡献是什么？', '这篇论文有哪些局限？'];
@@ -44,17 +45,71 @@ markdown.use({
   }
 });
 
-function renderMarkdown(source) {
+// Pull math out before Markdown sees it (so `_` and `*` inside formulas survive),
+// skipping code spans and fenced blocks. Returns the text with @@MATHn@@ placeholders.
+function extractMath(source) {
   const math = [];
   const stash = (tex, display) => `@@MATH${math.push({ tex, display }) - 1}@@`;
-  // Pull math out before Markdown sees it (so `_` and `*` inside formulas survive),
-  // skipping code spans and fenced blocks.
   const prepared = source.split(/(```[\s\S]*?(?:```|$)|`[^`\n]+`)/).map((part, i) => i % 2 ? part : part
     .replace(/\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]/g, (_, a, b) => stash(a ?? b, true))
     .replace(/\\\((.+?)\\\)|(?<![\\$\w])\$(?![\s$])([^$\n]+?)(?<!\s)\$(?![\w$])/g, (_, a, b) => stash(a ?? b, false))
   ).join('');
+  return { prepared, math };
+}
+
+function renderMarkdown(source) {
+  const { prepared, math } = extractMath(source);
   return markdown.parse(prepared).replace(/@@MATH(\d+)@@/g, (_, i) =>
     katex.renderToString(math[i].tex, { displayMode: math[i].display, throwOnError: false, output: 'html' }));
+}
+
+// The same reply as Zotero note HTML: math as the note editor's math nodes, citations as
+// page:N links (the plugin turns those into zotero://open-pdf links), raw HTML escaped.
+const noteMarkdown = new marked.Marked({ gfm: true, breaks: true });
+noteMarkdown.use({
+  renderer: {
+    html: ({ text }) => escapeHTML(text),
+    image: ({ text, href }) => escapeHTML(text || href || ''),
+    link({ href, tokens }) {
+      const label = this.parser.parseInline(tokens);
+      const page = /^page:(\d{1,4})$/i.exec(href || '')?.[1];
+      if (page) return `<a href="page:${page}">${label}</a>`;
+      return /^https?:\/\//i.test(href) ? `<a href="${escapeHTML(href)}">${label}</a>` : label;
+    }
+  }
+});
+
+function noteMarkdownHTML(source) {
+  const { prepared, math } = extractMath(source);
+  const mathNode = i => math[i].display
+    ? `<pre class="math">$$${escapeHTML(math[i].tex)}$$</pre>`
+    : `<span class="math">$${escapeHTML(math[i].tex)}$</span>`;
+  const box = document.createElement('div');
+  box.innerHTML = noteMarkdown.parse(prepared)
+    .replace(/<p>@@MATH(\d+)@@<\/p>/g, (match, i) => math[i].display ? mathNode(i) : match)
+    .replace(/@@MATH(\d+)@@/g, (_, i) => mathNode(i));
+  linkPages(box);
+  for (const link of box.querySelectorAll('a.page-ref')) {
+    const plain = document.createElement('a');
+    plain.href = `page:${link.dataset.page}`;
+    plain.textContent = link.textContent;
+    link.replaceWith(plain);
+  }
+  return box.innerHTML;
+}
+
+function buildNote(conv, index) {
+  const answer = conv.messages[index];
+  const question = conv.messages.slice(0, index).reverse().find(m => m.role === 'user');
+  const parts = [`<h1>${escapeHTML(question?.text || conv.title)}</h1>`];
+  if (question?.quote) {
+    parts.push(`<blockquote><p>${escapeHTML(question.quote.text)}</p></blockquote>`);
+    if (question.quote.page) parts.push(`<p><a href="page:${question.quote.page}">p. ${question.quote.page}</a></p>`);
+  }
+  parts.push(noteMarkdownHTML(answer.text));
+  const stamp = new Date().toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
+  parts.push(`<p>— Ask GPT · ${escapeHTML(currentModel()?.name || picker.model || '')} · ${escapeHTML(stamp)}</p>`);
+  return parts.join('\n');
 }
 
 // Page citations in replies — (p. 3), p.3, (pp. 23–25), 第 3 页, 第 23–25 页 — become
@@ -86,17 +141,15 @@ function locateFrom(node) {
 
 function linkPages(root) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: node => node.parentElement.closest('code, pre, a, .katex') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
+    acceptNode: node => node.parentElement.closest('code, pre, a, .katex, .math') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
   });
   const nodes = [];
-  while (walker.nextNode()) {
-    PAGE_REF.lastIndex = 0;
-    if (PAGE_REF.test(walker.currentNode.data)) nodes.push(walker.currentNode);
-  }
+  // search() ignores lastIndex; matchAll gets a fresh copy so no state carries between nodes.
+  while (walker.nextNode()) if (walker.currentNode.data.search(PAGE_REF) >= 0) nodes.push(walker.currentNode);
   for (const node of nodes) {
     const parts = [];
     let last = 0;
-    for (const match of node.data.matchAll(PAGE_REF)) {
+    for (const match of node.data.matchAll(new RegExp(PAGE_REF))) {
       parts.push(node.data.slice(last, match.index), pageLink(match[0], match[1] || match[2]));
       last = match.index + match[0].length;
     }
@@ -132,7 +185,7 @@ function quoteBlock(quote) {
   return block;
 }
 
-function messageNode(message) {
+function messageNode(message, index) {
   const node = element('div', `msg ${message.role}${message.pending ? ' pending' : ''}`);
   if (message.quote) node.append(quoteBlock(message.quote));
   if (message.role === 'assistant') {
@@ -153,7 +206,17 @@ function messageNode(message) {
         copy.innerHTML = `${icon('check')}<span>已复制</span>`;
         setTimeout(() => { copy.innerHTML = `${icon('copy')}<span>复制</span>`; }, 1200);
       });
-      actions.append(copy);
+      const note = element('button');
+      note.innerHTML = `${icon('note')}<span>${message.note ? '查看笔记' : '存为笔记'}</span>`;
+      note.title = message.note ? '在新窗口打开这条笔记' : '把这轮问答存为这篇论文的子笔记';
+      note.addEventListener('click', () => {
+        if (message.note) window.host?.openNote(index);
+        else {
+          note.disabled = true;
+          window.host?.saveNote(index, buildNote(lastConv, index));
+        }
+      });
+      actions.append(copy, note);
       node.append(actions);
     }
   } else {
@@ -171,7 +234,10 @@ function greeting() {
   return hour < 5 ? '夜深了' : hour < 11 ? '早上好' : hour < 13 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
 }
 
+let lastConv = null;
+
 window.render = conv => {
+  lastConv = conv;
   $('title').textContent = conv.title;
   $('title').title = conv.title;
   $('notice-text').textContent = conv.notice || '';
@@ -209,7 +275,7 @@ window.render = conv => {
       : 'AI 会结合整篇论文回答。也可以在 PDF 中选中文字，点「问 AI」引用它。'), list);
     messages.replaceChildren(empty);
   } else {
-    messages.replaceChildren(...conv.messages.map(messageNode));
+    messages.replaceChildren(...conv.messages.map((message, i) => messageNode(message, i)));
   }
   if (stick) messages.scrollTop = messages.scrollHeight;
   autosize();

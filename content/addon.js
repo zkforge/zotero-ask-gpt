@@ -52,8 +52,23 @@ var AIChatAddon = class {
       await this.locate(reader.itemID, { page: 5 });
       await Zotero.Promise.delay(1000);
       Zotero.debug(`[zoteroaichat] self-test navigate: asked p.5, reader at pageIndex ${reader._internalReader?._state?.primaryViewStats?.pageIndex}`);
+      const mode = Zotero.Prefs.get('extensions.zoteroaichat.devSelfTest', true);
+      if (mode === 'note') {
+        // Save a sample note through the real path, log it, then erase it and the temp messages.
+        const start = conv.messages.length;
+        conv.messages.push({ role: 'user', text: 'self-test' }, { role: 'assistant', text: 'self-test' });
+        await this.saveNote(reader.itemID, start + 1, '<h1>Ask GPT self-test</h1><p>See <a href="page:2">(p. 2)</a> and <span class="math">$x^2$</span>.</p><pre class="math">$$y = f(x)$$</pre>');
+        const attachment = Zotero.Items.get(reader.itemID);
+        const note = Zotero.Items.getByLibraryAndKey(attachment.libraryID, conv.messages[start + 1].note);
+        Zotero.debug(`[zoteroaichat] self-test note: child of paper=${note?.parentID === attachment.parentID}, html=${note?.getNote()}`);
+        await note?.eraseTx();
+        conv.messages.splice(start);
+        this.changed(conv);
+        await this.save(conv);
+        return;
+      }
       // "nav" checks navigation only, without adding a message to the saved conversation.
-      if (Zotero.Prefs.get('extensions.zoteroaichat.devSelfTest', true) === 'nav') return;
+      if (mode === 'nav') return;
       // Full mode: ask something that needs citations, follow the first one, then remove the
       // test exchange so the saved conversation is left as it was.
       const before = conv.messages.length;
@@ -198,6 +213,39 @@ var AIChatAddon = class {
     if (state?.query === text && total === 0) setFind({ ...find, active: false, popupOpen: false, query: '' });
   }
 
+  // Save one question/answer as a note: a child of the paper's parent item, or a standalone
+  // note when the PDF has no parent. page:N links become zotero://open-pdf links.
+  async saveNote(itemID, index, html) {
+    const conv = this.conversations.get(itemID);
+    const message = conv?.messages[index];
+    if (!message || message.role !== 'assistant') return;
+    const attachment = Zotero.Items.get(itemID);
+    const prefix = `zotero://open-pdf/${Zotero.API.getLibraryPrefix(attachment.libraryID)}/items/${attachment.key}`;
+    const note = new Zotero.Item('note');
+    note.libraryID = attachment.libraryID;
+    if (attachment.parentItem?.isRegularItem()) note.parentID = attachment.parentID;
+    note.setNote(html.replace(/href="page:(\d+)"/g, (_, page) => `href="${prefix}?page=${page}"`));
+    await note.saveTx();
+    message.note = note.key;
+    this.changed(conv);
+    await this.save(conv);
+  }
+
+  openNote(itemID, index) {
+    const conv = this.conversations.get(itemID);
+    const message = conv?.messages[index];
+    const attachment = Zotero.Items.get(itemID);
+    const note = message?.note && Zotero.Items.getByLibraryAndKey(attachment.libraryID, message.note);
+    if (note && !note.deleted) {
+      Zotero.getMainWindow().ZoteroPane.openNoteWindow(note.id);
+      return;
+    }
+    // The note was deleted since; offer saving again.
+    delete message.note;
+    this.changed(conv);
+    this.save(conv);
+  }
+
   clearQuote(itemID) {
     const conv = this.conversations.get(itemID);
     if (!conv?.quote) return;
@@ -245,7 +293,7 @@ var AIChatAddon = class {
         return;
       }
       await IOUtils.makeDirectory(PathUtils.parent(path), { ignoreExisting: true });
-      const messages = conv.messages.filter(m => !m.pending).map(({ role, text, quote, error }) => ({ role, text, quote, error }));
+      const messages = conv.messages.filter(m => !m.pending).map(({ role, text, quote, error, note }) => ({ role, text, quote, error, note }));
       await IOUtils.writeJSON(path, { version: 1, messages }, { tmpPath: path + '.tmp' });
     } catch (error) {
       Zotero.logError(error);

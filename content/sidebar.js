@@ -66,6 +66,9 @@ var AIChatSidebar = class {
       setModel: guard((model, effort) => this.addon.setModel(model, effort)),
       openURL: guard(url => /^https?:\/\//i.test(url) && Zotero.launchURL(url)),
       locate: guard(target => this.itemID && this.addon.locate(this.itemID, target).catch(error => Zotero.logError(error))),
+      saveNote: guard((index, html) => this.itemID && this.addon.saveNote(this.itemID, index, html)
+        .catch(error => { Zotero.logError(error); this.render(); })),
+      openNote: guard(index => this.itemID && this.addon.openNote(this.itemID, index)),
       close: guard(() => this.addon.toggle(this.win)),
       logError: error => Zotero.logError(error)
     };

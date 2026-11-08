@@ -64,8 +64,8 @@ var CodexService = class {
       for (const listener of this.threadListeners.values()) listener({ method: 'process/exited', params: { error: exited } });
     })();
 
-    const init = await peer.request('initialize', { clientInfo: { name: 'zotero-ai-chat', title: 'Zotero AI Chat', version: this.version } });
-    // userAgent looks like "zotero-ai-chat/0.167.0 (Mac OS …)"; the version is codex's.
+    const init = await peer.request('initialize', { clientInfo: { name: 'zotero-ask-gpt', title: 'Zotero Ask GPT', version: this.version } });
+    // userAgent looks like "zotero-ask-gpt/0.167.0 (Mac OS …)"; the version is codex's.
     this.serverVersion = /\/(\d+\.\d+\.\d+)/.exec(init?.userAgent || '')?.[1] || '未知版本';
     const [have, need] = [this.serverVersion, CodexService.MIN_VERSION].map(v => v.split('.').map(Number));
     const older = have.length === 3 && have.every(Number.isFinite) && (have[0] - need[0] || have[1] - need[1] || have[2] - need[2]) < 0;
@@ -106,7 +106,7 @@ var CodexService = class {
   async startThread(developerInstructions, history = []) {
     const result = await this.request('thread/start', {
       ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never',
-      serviceName: 'zotero-ai-chat',
+      serviceName: 'zotero-ask-gpt',
       baseInstructions: Zotero.Prefs.get('extensions.zoteroaichat.baseInstructions', true) || CodexService.BASE_INSTRUCTIONS,
       developerInstructions
     });

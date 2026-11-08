@@ -1,4 +1,4 @@
-# Zotero AI Chat — 设计
+# Zotero Ask GPT — 设计
 
 Zotero 10 阅读界面右侧的轻量 AI 侧栏：当前论文全文自动进入模型上下文，选中文字即可追问。后端复用本机 `codex app-server`，用 ChatGPT 账号登录，不需要 API key，也不嵌入网页。
 
@@ -8,10 +8,11 @@ Zotero 10 阅读界面右侧的轻量 AI 侧栏：当前论文全文自动进入
 - 阅读标签页右侧常驻侧栏，可拖宽、可收起，切换论文时会话跟着切换。
 - 每篇论文一个会话，打开时自动把全文放进上下文，重启 Zotero 后可以接着聊。
 - 选中文字后，浮窗出现「问 AI」按钮；选区以引用卡片的形式附在下一条消息上，带页码。
-- 流式输出，Markdown 渲染（含代码块、表格、公式）。
-- 预设动作：解释选文、翻译选文、总结全文。
+- 截图提问（图表、公式），从文库添加其他论文一起提问。
+- 流式输出，Markdown 渲染（含代码块、表格、公式），页码引用可跳转并高亮原句。
+- 回答存为 Zotero 笔记；最后一轮可编辑问题或重新生成。
 
-不做（至少第一版不做）：文献库级检索、多模型配置界面、图表/图片理解、写入笔记或批注、Windows/Linux 适配。
+不做：Codex 以外的模型服务（API key）、写入 PDF 批注、整个文库的语义检索、Windows/Linux 适配。
 
 ## 架构
 
@@ -114,15 +115,17 @@ content/
   vendor/               marked、KaTeX（含 woff2 字体与许可证）
 test/rpc.test.cjs       node --test test/rpc.test.cjs
 test/render.test.html   渲染测试页；CHROME=<chrome-headless-shell> node test/browser-test.mjs
-build.sh                打包 dist/zotero-ai-chat-<version>.xpi
+build.sh                打包 dist/zotero-ask-gpt.xpi，生成 dist/updates.json
+.github/workflows/ci.yml  推送和 PR 时跑测试；推送 vX.Y.Z 标签时发布 Release
 ```
 
 不引入 npm 构建链；纯 JS，用 zip 打包。
 
 ## 开发与验证
 
-- 开发安装：在 Zotero 配置目录的 `extensions/` 下放一个文本文件，文件名为插件 ID `zotero-ai-chat@local`，内容为源码目录的绝对路径；从 `prefs.js` 删掉 `extensions.lastAppBuildId` / `extensions.lastAppVersion` 以触发重新扫描。改完代码后用 `-purgecaches` 重启 Zotero。
+- 开发安装：在 Zotero 配置目录的 `extensions/` 下放一个文本文件，文件名为插件 ID `zotero-ask-gpt@zkforge`，内容为源码目录的绝对路径；从 `prefs.js` 删掉 `extensions.lastAppBuildId` / `extensions.lastAppVersion` 以触发重新扫描。改完代码后用 `-purgecaches` 重启 Zotero。
 - Zotero 要求清单里有 `applications.zotero.update_url`，否则会静默跳过插件。侧载的插件默认禁用，需要在插件管理里启用（或在 Zotero 退出时把 `extensions.json` 里对应条目改为 `userDisabled: false`）。
 - 测试：`node --test test/rpc.test.cjs`（JSON-RPC），`CHROME=… node test/browser-test.mjs`（在无头 Chrome 里跑 render.js 的测试，覆盖页码识别、公式提取、HTML 转义和笔记 HTML）。改 render.js 后两组都要跑。
+- 发布：改 `manifest.json` 的 `version`，提交后推送同名标签 `vX.Y.Z`。CI 校验标签与版本一致，跑测试，然后创建 Release 并上传 `zotero-ask-gpt.xpi` 和 `updates.json`。`manifest.json` 的 `update_url` 指向最新 Release 的 `updates.json`，README 的下载链接指向最新 Release 的 xpi，所以这两个文件名不能改。插件 ID 发布后不能再改，否则 Zotero 会当成另一个插件。
 - 用 `-ZoteroDebugText` 启动 Zotero，可以在 stdout 看到 `[zoteroaichat]` 日志。
 - 偏好设置 `extensions.zoteroaichat.devSelfTest` 有值时，bootstrap 额外加载 `content/selftest.js`，启动后对当前打开的论文做自测。值为 `true` 时：先跳到第 5 页并记录阅读器所在页，再问一个需要引用的问题，检查回复里的 `page:N` 引用数量，依次点开前两处并记录查找结果，最后删掉这轮问答再保存。设为 `"nav"` 时只测页码跳转，不会调用模型；设为 `"rerun"` 时依次提问、重新生成、编辑问题，检查每次都替换最后一轮问答、codex 回报了用量、状态条显示上下文占比，最后删掉这轮测试；设为 `"prefs"` 时打开设置面板，记录各字段、占位符和存储占用，并按一次「测试连接」；设为 `"image"` 时用模拟鼠标事件在当前页框选上下两块区域，记录裁剪结果，在一次性会话里让模型说出收到几张图并分别描述，然后删除这两张测试截图；设为 `"note"` 时用示例内容走一遍存为笔记，记录笔记位置和 HTML，然后永久删除这条测试笔记。没有打开的 PDF 时，若设置了 `extensions.zoteroaichat.devSelfTestItem`（`<libraryID>/<key>`），会先打开该附件。日常使用请关闭。

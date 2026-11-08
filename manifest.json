@@ -1,0 +1,14 @@
+{
+  "manifest_version": 2,
+  "name": "Zotero AI Chat",
+  "version": "0.1.0",
+  "description": "阅读界面右侧的 AI 侧栏，通过本机 Codex 使用 ChatGPT 账号对话。",
+  "applications": {
+    "zotero": {
+      "id": "zotero-ai-chat@local",
+      "update_url": "https://localhost/zotero-ai-chat/updates.json",
+      "strict_min_version": "10.0",
+      "strict_max_version": "10.*"
+    }
+  }
+}

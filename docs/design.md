@@ -38,7 +38,7 @@ Zotero 进程（插件，特权 JS）
 5. 接收通知：`item/agentMessage/delta`（流式文本）、`turn/completed`、`error`；停止生成用 `turn/interrupt`。
 6. 模型列表：`model/list`。
 
-所有参数类型都可以用 `codex app-server generate-ts --out <dir>` 生成后对照；协议标注为 experimental，codex 升级后需要回归测试。
+所有参数类型都可以用 `codex app-server generate-ts --out <dir>` 生成后对照。协议标注为 experimental，因此：启动时检查 codex 版本，低于 `CodexService.MIN_VERSION`（0.167.0，已验证的最低版本）就提示升级；codex 用 -32600「Invalid request: unknown variant / missing field …」拒绝请求时（接口改了），改报「当前 codex 不接受 Ask GPT 的 X 请求」。codex 对未知参数会静默接受。codex 升级后跑一遍自测。
 
 会话用 ephemeral：非 ephemeral 会话会出现在 Codex 应用的历史里，而归档后的会话无法 resume，所以由插件自己保存对话（见「会话持久化」）。
 
@@ -62,13 +62,14 @@ Zotero 进程（插件，特权 JS）
 
 - 每篇论文一个 JSON 文件：`<Zotero 数据目录>/ai-chat/conversations/<libraryID>-<itemKey>.json`，内容为 `{ version: 1, messages: [{ role, text, quote, error }] }`。每轮回复结束后写入。
 - 打开论文时读回消息并显示。之后第一次发送时新建 ephemeral 会话，用 `thread/inject_items` 回放历史。
-- 「新对话」按钮清空消息并删除文件，已提取的全文继续复用。
+- 「新对话」按钮清空消息并删除文件，这个对话里的截图文件也一起删除（笔记里只有页码链接，不引用截图文件）。已提取的全文继续复用。
 
 ### 界面
 
 - 挂载方式沿用已验证的做法：XUL `splitter` + `vbox` 追加到主窗口 `#browser`，只在阅读标签页显示，宽度存入偏好设置。
 - 面板内是一个 HTML 文档（`chrome://` 下的 `chat.html`），用 CSS 变量跟随 Zotero 的明暗主题。
 - 聊天页通过 `frameElement.aiChatSidebar.attach(window)` 主动向侧栏登记，拿到 `host` 动作对象；不依赖 iframe 的 load 事件。
+- 增量渲染：每条消息的 DOM 节点按「显示内容签名」缓存（WeakMap，键是消息对象），只重建签名变化的消息，并就地替换节点；流式输出时只重建正在生成的那条。30 条带公式的消息下，每次更新从约 16 ms 降到约 4 ms，且不再随对话长度增长。
 - 顶栏：论文标题（截断显示）、新对话、收起；标题下一行显示全文读取状态。
 - 消息区：AI 回复用 vendored 的 marked 15 + KaTeX 0.16 渲染，悬停时显示「复制」。空对话时给出三个常用问题。
 - 页码跳转与高亮：系统提示词要求模型把每处引用写成 `[(p. 3)](page:3 "该页原文中连续 4–12 个词")`，短语保持原文语言、不翻译。渲染时 `page:N` 链接显示为 (p. 3)，短语放在 `data-quote` 里。点击后先 `reader.navigate({ pageIndex })` 跳到该页，再写入阅读器的 `primaryViewFindState`（通过 `_internalReader._updateState`，对象用 `cloneInto` 放进阅读器 iframe），触发 pdf.js 短语查找：滚到匹配处并高亮，同时打开查找栏，按 Esc 关闭。约 1.5 秒后若 `result.total === 0`，就关掉查找栏，只停在该页。用户自己的引用保存了选区的 `position`（页码 + 矩形），点击时用 `reader.navigate({ position })` 精确高亮。普通文字里的 (p. 3)、pp. 23–25、第 3 页（跳过代码和公式）只跳页。页码与上下文中的 `[p.N]` 一致，范围跳到起始页。
@@ -105,8 +106,11 @@ content/
   sidebar.js            XUL 面板挂载与显隐、聊天页桥接
   prefs.xhtml / prefs.js / prefs.css   Zotero 设置窗口里的「Ask GPT」面板
   chat.html / chat.css / chat.js   聊天界面
+  render.js             Markdown/公式渲染、页码链接、笔记 HTML（聊天页和浏览器测试共用）
+  selftest.js           开发自测，只在设置了 devSelfTest 时加载
   vendor/               marked、KaTeX（含 woff2 字体与许可证）
 test/rpc.test.cjs       node --test test/rpc.test.cjs
+test/render.test.html   渲染测试页；CHROME=<chrome-headless-shell> node test/browser-test.mjs
 build.sh                打包 dist/zotero-ai-chat-<version>.xpi
 ```
 
@@ -116,5 +120,6 @@ build.sh                打包 dist/zotero-ai-chat-<version>.xpi
 
 - 开发安装：在 Zotero 配置目录的 `extensions/` 下放一个文本文件，文件名为插件 ID `zotero-ai-chat@local`，内容为源码目录的绝对路径；从 `prefs.js` 删掉 `extensions.lastAppBuildId` / `extensions.lastAppVersion` 以触发重新扫描。改完代码后用 `-purgecaches` 重启 Zotero。
 - Zotero 要求清单里有 `applications.zotero.update_url`，否则会静默跳过插件。侧载的插件默认禁用，需要在插件管理里启用（或在 Zotero 退出时把 `extensions.json` 里对应条目改为 `userDisabled: false`）。
+- 测试：`node --test test/rpc.test.cjs`（JSON-RPC），`CHROME=… node test/browser-test.mjs`（在无头 Chrome 里跑 render.js 的测试，覆盖页码识别、公式提取、HTML 转义和笔记 HTML）。改 render.js 后两组都要跑。
 - 用 `-ZoteroDebugText` 启动 Zotero，可以在 stdout 看到 `[zoteroaichat]` 日志。
-- 偏好设置 `extensions.zoteroaichat.devSelfTest = true` 时，启动后对当前打开的论文做自测：先跳到第 5 页并记录阅读器所在页，再问一个需要引用的问题，检查回复里的 `page:N` 引用数量，依次点开前两处并记录查找结果，最后删掉这轮问答再保存。设为 `"nav"` 时只测页码跳转，不会调用模型；设为 `"prefs"` 时打开设置面板，记录各字段、占位符和存储占用，并按一次「测试连接」；设为 `"image"` 时用模拟鼠标事件在当前页框选上下两块区域，记录裁剪结果，在一次性会话里让模型说出收到几张图并分别描述，然后删除这两张测试截图；设为 `"note"` 时用示例内容走一遍存为笔记，记录笔记位置和 HTML，然后永久删除这条测试笔记。日常使用请关闭。
+- 偏好设置 `extensions.zoteroaichat.devSelfTest` 有值时，bootstrap 额外加载 `content/selftest.js`，启动后对当前打开的论文做自测。值为 `true` 时：先跳到第 5 页并记录阅读器所在页，再问一个需要引用的问题，检查回复里的 `page:N` 引用数量，依次点开前两处并记录查找结果，最后删掉这轮问答再保存。设为 `"nav"` 时只测页码跳转，不会调用模型；设为 `"prefs"` 时打开设置面板，记录各字段、占位符和存储占用，并按一次「测试连接」；设为 `"image"` 时用模拟鼠标事件在当前页框选上下两块区域，记录裁剪结果，在一次性会话里让模型说出收到几张图并分别描述，然后删除这两张测试截图；设为 `"note"` 时用示例内容走一遍存为笔记，记录笔记位置和 HTML，然后永久删除这条测试笔记。日常使用请关闭。

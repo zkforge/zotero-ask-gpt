@@ -9,7 +9,9 @@ async function startup({ id, version, rootURI }) {
   chromeHandle = Cc['@mozilla.org/addons/addon-manager-startup;1']
     .getService(Ci.amIAddonManagerStartup)
     .registerChrome(Services.io.newURI(rootURI + 'manifest.json'), [['content', 'zoteroaichat', rootURI + 'content/']]);
-  for (const file of ['rpc.js', 'codex.js', 'sidebar.js', 'addon.js'])
+  const files = ['rpc.js', 'codex.js', 'sidebar.js', 'addon.js'];
+  if (Zotero.Prefs.get('extensions.zoteroaichat.devSelfTest', true)) files.push('selftest.js');
+  for (const file of files)
     Services.scriptloader.loadSubScriptWithOptions(rootURI + 'content/' + file, { target: this, ignoreCache: true });
   ZoteroAIChat = new AIChatAddon({ id, version, rootURI });
   // The settings pane runs in the Settings window and reaches the plugin through Zotero.

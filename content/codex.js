@@ -67,6 +67,12 @@ var CodexService = class {
     const init = await peer.request('initialize', { clientInfo: { name: 'zotero-ai-chat', title: 'Zotero AI Chat', version: this.version } });
     // userAgent looks like "zotero-ai-chat/0.167.0 (Mac OS …)"; the version is codex's.
     this.serverVersion = /\/(\d+\.\d+\.\d+)/.exec(init?.userAgent || '')?.[1] || '未知版本';
+    const [have, need] = [this.serverVersion, CodexService.MIN_VERSION].map(v => v.split('.').map(Number));
+    const older = have.length === 3 && have.every(Number.isFinite) && (have[0] - need[0] || have[1] - need[1] || have[2] - need[2]) < 0;
+    if (older) {
+      this.stop();
+      throw new Error(`codex 版本过旧（${this.serverVersion}），Ask GPT 需要 ${CodexService.MIN_VERSION} 或更新版本。请在终端运行 npm install -g @openai/codex 升级。`);
+    }
     peer.notify('initialized');
   }
 
@@ -81,9 +87,18 @@ var CodexService = class {
     return scheme ? `${scheme}://${info.host}:${info.port}` : '';
   }
 
+  // codex answers requests it no longer understands (renamed method, changed input type)
+  // with -32600 "Invalid request: …"; explain that as a version mismatch.
   async request(method, params) {
     await this.start();
-    return this.peer.request(method, params);
+    try {
+      return await this.peer.request(method, params);
+    } catch (error) {
+      if (error.code !== -32600 || !/^Invalid request/.test(error.message)) throw error;
+      Zotero.debug(`[zoteroaichat] ${method} rejected by codex ${this.serverVersion}: ${error.message}`);
+      const reason = error.message.replace(/^Invalid request:\s*/, '').slice(0, 120);
+      throw new Error(`当前 codex（${this.serverVersion}）不接受 Ask GPT 发出的 ${method} 请求，可能是 codex 更新后改了接口。请先把 codex 升级到最新版；如果已经是最新版，需要更新插件。（${reason}）`);
+    }
   }
 
   // Threads are ephemeral so they stay out of the Codex app's history; the plugin stores
@@ -139,6 +154,9 @@ var CodexService = class {
     this.ready = null;
   }
 };
+
+// Oldest codex verified with this plugin (ephemeral threads, thread/inject_items, localImage).
+CodexService.MIN_VERSION = '0.167.0';
 
 CodexService.BASE_INSTRUCTIONS = `You are a research reading assistant embedded in the Zotero PDF reader.
 The user is reading an academic paper and asks questions about it, often about a quoted passage.

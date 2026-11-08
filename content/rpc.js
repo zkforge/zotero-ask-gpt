@@ -39,7 +39,7 @@ var JsonRpcPeer = class {
         const waiter = this.pending.get(message.id);
         if (!waiter) continue;
         this.pending.delete(message.id);
-        if (message.error) waiter.reject(new Error(message.error.message || JSON.stringify(message.error)));
+        if (message.error) waiter.reject(Object.assign(new Error(message.error.message || JSON.stringify(message.error)), { code: message.error.code }));
         else waiter.resolve(message.result);
       }
     }

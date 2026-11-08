@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>render tests</title></head>
+<body>
+<pre id="results"></pre>
+<script src="../content/vendor/marked.umd.js"></script>
+<script src="../content/vendor/katex/katex.min.js"></script>
+<script src="../content/render.js"></script>
+<script>
+const results = [];
+function test(name, fn) {
+  try { fn(); results.push({ name, ok: true }); }
+  catch (error) { results.push({ name, ok: false, error: error.message }); }
+}
+function equal(actual, expected, label = '') {
+  const a = JSON.stringify(actual), e = JSON.stringify(expected);
+  if (a !== e) throw new Error(`${label} expected ${e}, got ${a}`);
+}
+function html(markup) {
+  const box = document.createElement('div');
+  box.innerHTML = markup;
+  return box;
+}
+const refs = box => [...box.querySelectorAll('a.page-ref')].map(a => [a.textContent, a.dataset.page]);
+
+test('linkPages: every citation form, first page of a range', () => {
+  const box = html('<p>见（p. 3）与 (pp. 23–25)，p.12、第 7 页、第30-31页。</p>');
+  linkPages(box);
+  equal(refs(box), [['p. 3', '3'], ['pp. 23–25', '23'], ['p.12', '12'], ['第 7 页', '7'], ['第30-31页', '30']]);
+});
+
+test('linkPages: citations spread over several text nodes are all linked', () => {
+  // Regression: a shared global regex leaked lastIndex between nodes and skipped matches.
+  const box = html('<p>first p. 31 and p. 32</p><ul><li>see (p. 5)</li><li>and p. 6</li></ul><p><strong>bold</strong> then p. 7</p>');
+  linkPages(box);
+  equal(refs(box).map(r => r[1]), ['31', '32', '5', '6', '7']);
+});
+
+test('linkPages: leaves look-alikes, code, math and links alone', () => {
+  const box = html('<p>app. 3, step 4, map.5</p><code>see p. 9</code><pre>p. 8</pre><span class="katex">p. 2</span><span class="math">p. 1</span><a href="#">p. 4</a>');
+  linkPages(box);
+  equal(refs(box), []);
+});
+
+test('renderMarkdown: raw HTML, javascript: links and images stay inert', () => {
+  const box = html(renderMarkdown('<img src=x onerror="window.pwned=1"> [bad](javascript:alert(1)) ![pic](https://example.com/a.png) <script>alert(1)<\/script>'));
+  equal(box.querySelectorAll('img, script').length, 0, 'elements');
+  equal([...box.querySelectorAll('a')].length, 0, 'links');
+  equal(box.textContent.includes('<img src=x'), true, 'escaped text');
+  equal(box.textContent.includes('pic'), true, 'image alt text');
+});
+
+test('renderMarkdown: http links are external, page: links carry the phrase', () => {
+  const box = html(renderMarkdown('[arXiv](https://arxiv.org/abs/1) and [(p. 3)](page:3 "a verbatim phrase")'));
+  const [external, cite] = box.querySelectorAll('a');
+  equal(external.hasAttribute('data-external'), true, 'external');
+  equal([cite.className, cite.dataset.page, cite.dataset.quote, cite.textContent], ['page-ref', '3', 'a verbatim phrase', '(p. 3)']);
+});
+
+test('renderMarkdown: a crafted page: link cannot inject attributes', () => {
+  const box = html(renderMarkdown('[x](page:3" onclick="alert(1)) and [y](page:4 "q\\" onclick=\\"alert(1)")'));
+  equal(box.querySelectorAll('[onclick]').length, 0);
+});
+
+test('renderMarkdown: math renders, dollars in prose and code do not', () => {
+  const box = html(renderMarkdown('Prices $5 and $10. Inline $a_{t+1}$ and display $$\\frac{x}{y}$$\n\n`cost $3`'));
+  equal(box.querySelectorAll('.katex').length, 2, 'katex nodes');
+  equal(box.textContent.includes('$5 and $10'), true, 'prose dollars');
+  equal(box.querySelector('code').textContent, 'cost $3', 'code dollars');
+});
+
+test('extractMath: underscores and stars inside math survive Markdown', () => {
+  // Display math is pulled out first, so placeholder numbers need not follow reading order;
+  // each placeholder must map to its own formula.
+  const { prepared, math } = extractMath('a $x_1 * y_2$ b \\(z_3\\) c \\[w_4\\]');
+  const inOrder = [...prepared.matchAll(/@@MATH(\d+)@@/g)].map(m => [math[m[1]].tex, math[m[1]].display]);
+  equal(inOrder, [['x_1 * y_2', false], ['z_3', false], ['w_4', true]]);
+  equal(prepared.replace(/@@MATH\d+@@/g, '#'), 'a # b # c #');
+});
+
+test('noteMarkdownHTML: note-editor math nodes and page links', () => {
+  const out = noteMarkdownHTML('See [(p. 2)](page:2 "x") and (pp. 9–10). Inline $a<b$.\n\n$$y = f(x)$$');
+  const box = html(out);
+  equal([...box.querySelectorAll('a')].map(a => a.getAttribute('href')), ['page:2', 'page:9']);
+  equal(box.querySelector('span.math').textContent, '$a<b$', 'inline math');
+  equal(box.querySelector('pre.math').textContent, '$$y = f(x)$$', 'display math');
+  equal(box.querySelectorAll('.katex, p > pre').length, 0, 'no katex, no pre inside p');
+});
+
+test('buildNote: question, quote, screenshots, answer and footer', () => {
+  const conv = { title: 'Paper', messages: [
+    { role: 'user', text: 'Why <this>?', quote: { page: 3, text: 'a quoted line' }, images: [{ page: 5 }] },
+    { role: 'assistant', text: 'Because [(p. 3)](page:3 "x").' }
+  ] };
+  const box = html(buildNote(conv, 1, 'GPT-6.1-Sol', '2026年11月8日 14:00'));
+  equal(box.querySelector('h1').textContent, 'Why <this>?', 'title');
+  equal(box.querySelector('blockquote').textContent, 'a quoted line', 'quote');
+  equal([...box.querySelectorAll('a')].map(a => a.getAttribute('href')), ['page:5', 'page:3', 'page:3'], 'links');
+  equal(box.lastElementChild.textContent, '— Ask GPT · GPT-6.1-Sol · 2026年11月8日 14:00', 'footer');
+});
+
+document.getElementById('results').textContent = JSON.stringify(results);
+</script>
+</body>
+</html>

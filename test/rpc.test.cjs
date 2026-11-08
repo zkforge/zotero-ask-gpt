@@ -15,8 +15,8 @@ test('resolves responses split across chunks', async () => {
 test('rejects error responses', async () => {
   const peer = new JsonRpcPeer(() => {});
   const result = peer.request('turn/start', {});
-  peer.feed('{"id":1,"error":{"code":-1,"message":"boom"}}\n');
-  await assert.rejects(result, /boom/);
+  peer.feed('{"id":1,"error":{"code":-32600,"message":"boom"}}\n');
+  await assert.rejects(result, error => error.message === 'boom' && error.code === -32600);
 });
 
 test('dispatches several notifications in one chunk, including unicode', () => {

@@ -454,7 +454,13 @@ async function refreshPapers() {
   const ticket = ++paperQuery;
   let groups;
   try { groups = await window.host.searchPapers(query); }
-  catch (error) { window.host?.logError(error); groups = []; }
+  catch (error) {
+    window.host?.logError(error);
+    if (ticket === paperQuery) {
+      paperResults.replaceChildren(element('div', 'empty-note', '暂时无法搜索文库，请重新打开菜单再试。'));
+    }
+    return;
+  }
   if (ticket !== paperQuery) return;
   const added = new Set((lastConv?.papers || []).map(p => `${p.libraryID}/${p.key}`));
   const nodes = [];

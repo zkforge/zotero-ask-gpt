@@ -53,6 +53,40 @@ var AIChatAddon = class {
       await Zotero.Promise.delay(1000);
       Zotero.debug(`[zoteroaichat] self-test navigate: asked p.5, reader at pageIndex ${reader._internalReader?._state?.primaryViewStats?.pageIndex}`);
       const mode = Zotero.Prefs.get('extensions.zoteroaichat.devSelfTest', true);
+      if (mode === 'image') {
+        // Drive the real overlay with synthetic mouse events over the visible page, then ask
+        // the model about the crop in a throwaway thread.
+        const win = reader._internalReader._primaryView._iframeWindow;
+        const canvas = [...win.document.querySelectorAll('.page .canvasWrapper canvas')]
+          .find(c => { const r = c.getBoundingClientRect(); return r.bottom > 0 && r.top < win.innerHeight; });
+        Zotero.debug(`[zoteroaichat] self-test image: canvases=${win.document.querySelectorAll('.page .canvasWrapper canvas').length}, visible=${!!canvas}`);
+        const page = canvas.getBoundingClientRect();
+        const top = Math.max(page.top, 0);
+        const bottom = Math.min(page.bottom, win.innerHeight);
+        const from = { clientX: page.left + page.width * 0.1, clientY: top + (bottom - top) * 0.1 };
+        const to = { clientX: page.left + page.width * 0.9, clientY: top + (bottom - top) * 0.5 };
+        this.startCapture(reader.itemID);
+        const overlay = win.document.getElementById('zoteroaichat-capture');
+        // Event init dicts must live in the pdf.js window, or the coordinates are dropped.
+        const mouse = (type, point) => new win.MouseEvent(type, Components.utils.cloneInto({ bubbles: true, ...point }, win));
+        overlay.dispatchEvent(mouse('mousedown', from));
+        overlay.dispatchEvent(mouse('mousemove', to));
+        overlay.dispatchEvent(mouse('mouseup', to));
+        for (let i = 0; i < 20 && !conv.image && !conv.captureError; i++) await Zotero.Promise.delay(200);
+        Zotero.debug(`[zoteroaichat] self-test image: overlay removed=${!win.document.getElementById('zoteroaichat-capture')}, image=${JSON.stringify(conv.image)}, error=${conv.captureError}`);
+        if (conv.image) {
+          const threadId = await this.codex.startThread('');
+          let reply = '';
+          const done = new Promise(resolve => this.codex.listen(threadId, ({ method, params }) => {
+            if (method === 'item/agentMessage/delta') reply += params.delta;
+            if (method === 'turn/completed') resolve(params.turn.status);
+          }));
+          await this.codex.startTurn(threadId, 'Describe this image from a paper in one sentence.', [conv.image.path]);
+          Zotero.debug(`[zoteroaichat] self-test image reply (${await done}): ${reply}`);
+          this.clearImage(reader.itemID);
+        }
+        return;
+      }
       if (mode === 'note') {
         // Save a sample note through the real path, log it, then erase it and the temp messages.
         const start = conv.messages.length;
@@ -171,6 +205,117 @@ var AIChatAddon = class {
     if (open) this.sidebars.get(win).focusInput();
   }
 
+  readerFor(itemID) {
+    const current = this.currentReader(Zotero.getMainWindow());
+    return current?.itemID === itemID ? current : Zotero.Reader._readers.find(r => r.itemID === itemID) || null;
+  }
+
+  // Let the user drag a box over the PDF and attach that region as an image to the next
+  // message. The overlay lives in the pdf.js document; wheel events still scroll the PDF.
+  startCapture(itemID) {
+    const reader = this.readerFor(itemID);
+    const win = reader?._internalReader?._primaryView?._iframeWindow;
+    if (!win) return;
+    const doc = win.document;
+    doc.getElementById('zoteroaichat-capture')?.remove();
+    const overlay = doc.createElement('div');
+    overlay.id = 'zoteroaichat-capture';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;cursor:crosshair;background:rgba(0,0,0,0.06);';
+    const hint = doc.createElement('div');
+    hint.textContent = '拖动框选图表或公式 · Esc 取消';
+    hint.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);padding:5px 12px;border-radius:8px;background:rgba(0,0,0,0.75);color:#fff;font:12px -apple-system,system-ui,sans-serif;pointer-events:none;';
+    const box = doc.createElement('div');
+    box.style.cssText = 'position:fixed;display:none;border:1.5px solid AccentColor;background:color-mix(in srgb, AccentColor 12%, transparent);border-radius:2px;pointer-events:none;';
+    overlay.append(hint, box);
+    doc.body.append(overlay);
+    win.focus();
+
+    let start = null;
+    const rectOf = event => ({
+      left: Math.min(start.x, event.clientX), top: Math.min(start.y, event.clientY),
+      right: Math.max(start.x, event.clientX), bottom: Math.max(start.y, event.clientY)
+    });
+    const finish = () => { overlay.remove(); win.removeEventListener('keydown', onKey, true); };
+    const onKey = event => { if (event.key === 'Escape') { event.preventDefault(); finish(); } };
+    win.addEventListener('keydown', onKey, true);
+    overlay.addEventListener('wheel', event => {
+      doc.getElementById('viewerContainer')?.scrollBy(event.deltaX, event.deltaY);
+      event.preventDefault();
+    }, { passive: false });
+    overlay.addEventListener('mousedown', event => {
+      start = { x: event.clientX, y: event.clientY };
+      Object.assign(box.style, { display: 'block', left: start.x + 'px', top: start.y + 'px', width: '0px', height: '0px' });
+      event.preventDefault();
+    });
+    overlay.addEventListener('mousemove', event => {
+      if (!start) return;
+      const r = rectOf(event);
+      Object.assign(box.style, { left: r.left + 'px', top: r.top + 'px', width: (r.right - r.left) + 'px', height: (r.bottom - r.top) + 'px' });
+    });
+    overlay.addEventListener('mouseup', event => {
+      if (!start) return;
+      const rect = rectOf(event);
+      finish();
+      this.attachCapture(itemID, reader, rect).catch(error => {
+        Zotero.logError(error);
+        const conv = this.conversation(itemID);
+        conv.captureError = error.message;
+        this.changed(conv);
+      });
+    });
+  }
+
+  async attachCapture(itemID, reader, rect) {
+    const image = await this.cropRegion(reader, rect);
+    const conv = this.conversation(itemID);
+    conv.image = image;
+    conv.captureError = null;
+    this.toggle(Zotero.getMainWindow(), true);
+    this.changed(conv);
+  }
+
+  // Crop a viewport rect from the rendered canvas of the page under it and save it as PNG.
+  async cropRegion(reader, rect) {
+    const doc = reader._internalReader._primaryView._iframeWindow.document;
+    // Hit-test by geometry: Zotero disables pointer events on pdf.js pages, so
+    // elementsFromPoint() does not return them.
+    const cx = (rect.left + rect.right) / 2;
+    const cy = (rect.top + rect.bottom) / 2;
+    const pageEl = [...doc.querySelectorAll('.page')].find(el => {
+      const r = el.getBoundingClientRect();
+      return cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
+    });
+    const canvas = pageEl?.querySelector('.canvasWrapper canvas');
+    if (!canvas) {
+      Zotero.debug(`[zoteroaichat] capture miss: rect=${JSON.stringify(rect)} pages=${JSON.stringify([...doc.querySelectorAll('.page')].map(el => { const r = el.getBoundingClientRect(); return [el.dataset.pageNumber, Math.round(r.left), Math.round(r.top), Math.round(r.right), Math.round(r.bottom), !!el.querySelector('.canvasWrapper canvas')]; }))}`);
+      throw new Error('请框选 PDF 页面上的区域');
+    }
+    const page = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / page.width;
+    const scaleY = canvas.height / page.height;
+    const left = Math.max(rect.left, page.left), top = Math.max(rect.top, page.top);
+    const right = Math.min(rect.right, page.right), bottom = Math.min(rect.bottom, page.bottom);
+    if (right - left < 8 || bottom - top < 8) throw new Error('框选区域太小');
+    const out = doc.createElement('canvas');
+    out.width = Math.round((right - left) * scaleX);
+    out.height = Math.round((bottom - top) * scaleY);
+    out.getContext('2d').drawImage(canvas, (left - page.left) * scaleX, (top - page.top) * scaleY, out.width, out.height, 0, 0, out.width, out.height);
+    const binary = atob(out.toDataURL('image/png').split(',')[1]);
+    const dir = PathUtils.join(Zotero.DataDirectory.dir, 'ai-chat', 'images');
+    await IOUtils.makeDirectory(dir, { ignoreExisting: true });
+    const path = PathUtils.join(dir, `${Date.now()}-${Zotero.Utilities.randomString(6)}.png`);
+    await IOUtils.write(path, Uint8Array.from(binary, c => c.charCodeAt(0)));
+    return { path, url: PathUtils.toFileURI(path), page: Number(pageEl.dataset.pageNumber) || null, width: out.width, height: out.height };
+  }
+
+  clearImage(itemID) {
+    const conv = this.conversations.get(itemID);
+    if (!conv) return;
+    conv.image = null;
+    conv.captureError = null;
+    this.changed(conv);
+  }
+
   quote(reader, annotation) {
     if (!annotation?.text) return;
     const conv = this.conversation(reader.itemID);
@@ -188,8 +333,7 @@ var AIChatAddon = class {
   // when a verbatim phrase is given, find it with the reader's search, which scrolls to and
   // highlights the match. A phrase that is not found closes the find bar again.
   async locate(itemID, { page, text, position }) {
-    const current = this.currentReader(Zotero.getMainWindow());
-    const reader = current?.itemID === itemID ? current : Zotero.Reader._readers.find(r => r.itemID === itemID);
+    const reader = this.readerFor(itemID);
     if (!reader) return;
     if (position) {
       reader.navigate({ position });
@@ -293,7 +437,7 @@ var AIChatAddon = class {
         return;
       }
       await IOUtils.makeDirectory(PathUtils.parent(path), { ignoreExisting: true });
-      const messages = conv.messages.filter(m => !m.pending).map(({ role, text, quote, error, note }) => ({ role, text, quote, error, note }));
+      const messages = conv.messages.filter(m => !m.pending).map(({ role, text, quote, image, error, note }) => ({ role, text, quote, image, error, note }));
       await IOUtils.writeJSON(path, { version: 1, messages }, { tmpPath: path + '.tmp' });
     } catch (error) {
       Zotero.logError(error);
@@ -301,11 +445,15 @@ var AIChatAddon = class {
   }
 
   // The text codex sees for a user message, with the quoted passage inlined.
-  promptFor(message) {
-    const { quote, text } = message;
-    return quote
-      ? `Quoted passage from the paper${quote.page ? ` (p. ${quote.page})` : ''}:\n"""\n${quote.text}\n"""\n\n${text}`
-      : text;
+  // An attached image is sent as a local image with the turn; in replayed history only a
+  // note that it was there survives.
+  promptFor(message, { replay = false } = {}) {
+    const { quote, image, text } = message;
+    const parts = [];
+    if (image) parts.push(`${replay ? '[An image was attached here: ' : '[Attached image: '}a region cropped from the PDF${image.page ? ` on p. ${image.page}` : ''}]`);
+    if (quote) parts.push(`Quoted passage from the paper${quote.page ? ` (p. ${quote.page})` : ''}:\n"""\n${quote.text}\n"""`);
+    parts.push(text);
+    return parts.join('\n\n');
   }
 
   // Builds the developer instructions for the paper: metadata plus full text with
@@ -361,13 +509,14 @@ var AIChatAddon = class {
   async send(itemID, text) {
     const conv = this.conversation(itemID);
     await conv.restored;
-    const quote = conv.quote;
-    text = text.trim() || (quote ? '解释这段文字。' : '');
+    const { quote, image } = conv;
+    text = text.trim() || (image ? '解释这张图（或表格、公式）的含义。' : quote ? '解释这段文字。' : '');
     if (conv.busy || !text) return;
     Zotero.debug(`[zoteroaichat] send for item ${itemID}`);
-    const history = conv.threadId ? [] : conv.messages.map(m => ({ role: m.role, text: m.role === 'user' ? this.promptFor(m) : m.text }));
-    const message = { role: 'user', text, quote };
+    const history = conv.threadId ? [] : conv.messages.map(m => ({ role: m.role, text: m.role === 'user' ? this.promptFor(m, { replay: true }) : m.text }));
+    const message = { role: 'user', text, quote, image };
     conv.quote = null;
+    conv.image = null;
     conv.messages.push(message);
     conv.messages.push({ role: 'assistant', text: '', pending: true });
     conv.busy = true;
@@ -378,7 +527,7 @@ var AIChatAddon = class {
         conv.threadId = await this.codex.startThread(conv.instructions, history);
         this.codex.listen(conv.threadId, event => this.onEvent(conv, event));
       }
-      conv.turnId = await this.codex.startTurn(conv.threadId, this.promptFor(message));
+      conv.turnId = await this.codex.startTurn(conv.threadId, this.promptFor(message), image ? [image.path] : []);
     } catch (error) {
       Zotero.logError(error);
       this.finishTurn(conv, error.message);
@@ -396,7 +545,7 @@ var AIChatAddon = class {
     const conv = this.conversations.get(itemID);
     if (!conv) return;
     this.stop(itemID);
-    const fresh = { ...conv, threadId: null, turnId: null, busy: false, messages: [], quote: null };
+    const fresh = { ...conv, threadId: null, turnId: null, busy: false, messages: [], quote: null, image: null };
     this.conversations.set(itemID, fresh);
     this.changed(fresh);
     this.save(fresh);

@@ -94,11 +94,12 @@ var CodexService = class {
     return threadId;
   }
 
-  async startTurn(threadId, text) {
+  async startTurn(threadId, text, imagePaths = []) {
     const model = Zotero.Prefs.get('extensions.zoteroaichat.model', true);
     const effort = Zotero.Prefs.get('extensions.zoteroaichat.effort', true);
     const result = await this.request('turn/start', {
-      threadId, input: [{ type: 'text', text, text_elements: [] }],
+      threadId,
+      input: [...imagePaths.map(path => ({ type: 'localImage', path })), { type: 'text', text, text_elements: [] }],
       ...(model && { model }), ...(effort && { effort })
     });
     return result.turn.id;

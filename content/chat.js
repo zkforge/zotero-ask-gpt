@@ -102,6 +102,9 @@ function buildNote(conv, index) {
   const answer = conv.messages[index];
   const question = conv.messages.slice(0, index).reverse().find(m => m.role === 'user');
   const parts = [`<h1>${escapeHTML(question?.text || conv.title)}</h1>`];
+  if (question?.image) {
+    parts.push(`<p>[截图${question.image.page ? `：<a href="page:${question.image.page}">p. ${question.image.page}</a>` : ''}]</p>`);
+  }
   if (question?.quote) {
     parts.push(`<blockquote><p>${escapeHTML(question.quote.text)}</p></blockquote>`);
     if (question.quote.page) parts.push(`<p><a href="page:${question.quote.page}">p. ${question.quote.page}</a></p>`);
@@ -187,6 +190,15 @@ function quoteBlock(quote) {
 
 function messageNode(message, index) {
   const node = element('div', `msg ${message.role}${message.pending ? ' pending' : ''}`);
+  if (message.image) {
+    const image = element('img', 'msg-image');
+    image.src = message.image.url;
+    image.alt = '框选的截图';
+    image.title = message.image.page ? `跳到第 ${message.image.page} 页` : '';
+    image.dataset.page = message.image.page || '';
+    image.addEventListener('click', () => locateFrom(image));
+    node.append(image);
+  }
   if (message.quote) node.append(quoteBlock(message.quote));
   if (message.role === 'assistant') {
     if (message.text) {
@@ -248,9 +260,18 @@ window.render = conv => {
   send.title = busy ? '停止生成' : '发送';
   send.setAttribute('aria-label', send.title);
 
-  hasQuote = !!conv.quote;
-  $('quote').hidden = !hasQuote;
-  if (hasQuote) {
+  $('image-card').hidden = !conv.image;
+  if (conv.image) {
+    $('image-thumb').src = conv.image.url;
+    $('image-thumb').dataset.page = conv.image.page || '';
+    $('image-label').textContent = conv.image.page ? `截图 · 第 ${conv.image.page} 页` : '截图';
+  }
+  $('capture-error').hidden = !conv.captureError;
+  $('capture-error').textContent = conv.captureError || '';
+
+  hasQuote = !!conv.quote || !!conv.image;
+  $('quote').hidden = !conv.quote;
+  if (conv.quote) {
     $('quote-page').textContent = conv.quote.page ? `引用 · 第 ${conv.quote.page} 页` : '引用';
     const label = $('quote-page');
     label.dataset.page = conv.quote.page || '';
@@ -258,7 +279,8 @@ window.render = conv => {
     label.dataset.position = conv.quote.position ? JSON.stringify(conv.quote.position) : '';
     $('quote-body').replaceChildren(element('div', 'quote-text', conv.quote.text));
   }
-  input.placeholder = hasQuote ? '针对这段文字提问，直接发送即解释' : '问问这篇论文…';
+  input.placeholder = conv.image ? '针对这张图提问，直接发送即解释'
+    : conv.quote ? '针对这段文字提问，直接发送即解释' : '问问这篇论文…';
 
   const stick = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 40;
   if (!conv.messages.length) {
@@ -414,6 +436,9 @@ messages.addEventListener('click', event => {
 });
 $('quote-clear').addEventListener('click', () => window.host?.clearQuote());
 $('quote-page').addEventListener('click', event => locateFrom(event.currentTarget));
+$('capture').addEventListener('click', () => window.host?.capture());
+$('image-clear').addEventListener('click', () => window.host?.clearImage());
+$('image-thumb').addEventListener('click', event => locateFrom(event.currentTarget));
 for (const button of document.querySelectorAll('[data-prompt]'))
   button.addEventListener('click', () => submit(button.dataset.prompt));
 $('reset').addEventListener('click', () => window.host?.reset());

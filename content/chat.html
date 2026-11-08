@@ -37,8 +37,21 @@
         </div>
         <div id="quote-body"></div>
       </div>
+      <div id="image-card" hidden>
+        <img id="image-thumb" alt="框选的截图">
+        <div class="image-meta">
+          <span id="image-label" class="label"></span>
+          <button id="image-clear" class="icon small" title="移除截图" aria-label="移除截图">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 5l6 6M11 5l-6 6"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="capture-error" class="capture-error" hidden></div>
       <textarea id="input" rows="2" placeholder="问问这篇论文…" title="Enter 发送，Shift+Enter 换行"></textarea>
       <div class="bar">
+        <button id="capture" class="icon tool" title="截图提问：在 PDF 上框选图表或公式" aria-label="截图提问">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5.5v-2a1 1 0 0 1 1-1h2M10.5 2.5h2a1 1 0 0 1 1 1v2M13.5 10.5v2a1 1 0 0 1-1 1h-2M5.5 13.5h-2a1 1 0 0 1-1-1v-2"/><circle cx="8" cy="8" r="2"/></svg>
+        </button>
         <button id="model-button" class="picker-button" hidden aria-haspopup="menu" aria-expanded="false" title="模型"></button>
         <button id="effort-button" class="picker-button effort" hidden aria-haspopup="menu" aria-expanded="false" title="思考强度"></button>
         <button id="send" class="send" title="发送" aria-label="发送">

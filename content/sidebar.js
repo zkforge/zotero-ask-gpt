@@ -70,7 +70,7 @@ var AIChatSidebar = class {
         .catch(error => { Zotero.logError(error); this.render(); })),
       openNote: guard(index => this.itemID && this.addon.openNote(this.itemID, index)),
       capture: guard(() => this.itemID && this.addon.startCapture(this.itemID)),
-      clearImage: guard(() => this.itemID && this.addon.clearImage(this.itemID)),
+      clearImage: guard(index => this.itemID && this.addon.clearImage(this.itemID, index)),
       close: guard(() => this.addon.toggle(this.win)),
       logError: error => Zotero.logError(error)
     };

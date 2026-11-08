@@ -63,26 +63,32 @@ var AIChatAddon = class {
         const page = canvas.getBoundingClientRect();
         const top = Math.max(page.top, 0);
         const bottom = Math.min(page.bottom, win.innerHeight);
-        const from = { clientX: page.left + page.width * 0.1, clientY: top + (bottom - top) * 0.1 };
-        const to = { clientX: page.left + page.width * 0.9, clientY: top + (bottom - top) * 0.5 };
-        this.startCapture(reader.itemID);
-        const overlay = win.document.getElementById('zoteroaichat-capture');
         // Event init dicts must live in the pdf.js window, or the coordinates are dropped.
         const mouse = (type, point) => new win.MouseEvent(type, Components.utils.cloneInto({ bubbles: true, ...point }, win));
-        overlay.dispatchEvent(mouse('mousedown', from));
-        overlay.dispatchEvent(mouse('mousemove', to));
-        overlay.dispatchEvent(mouse('mouseup', to));
-        for (let i = 0; i < 20 && !conv.image && !conv.captureError; i++) await Zotero.Promise.delay(200);
-        Zotero.debug(`[zoteroaichat] self-test image: overlay removed=${!win.document.getElementById('zoteroaichat-capture')}, image=${JSON.stringify(conv.image)}, error=${conv.captureError}`);
-        if (conv.image) {
+        // Two captures: the upper and the lower part of the visible page.
+        for (const [y1, y2] of [[0.1, 0.45], [0.55, 0.9]]) {
+          const count = conv.images?.length || 0;
+          this.startCapture(reader.itemID);
+          const overlay = win.document.getElementById('zoteroaichat-capture');
+          const from = { clientX: page.left + page.width * 0.1, clientY: top + (bottom - top) * y1 };
+          const to = { clientX: page.left + page.width * 0.9, clientY: top + (bottom - top) * y2 };
+          overlay.dispatchEvent(mouse('mousedown', from));
+          overlay.dispatchEvent(mouse('mousemove', to));
+          overlay.dispatchEvent(mouse('mouseup', to));
+          for (let i = 0; i < 20 && (conv.images?.length || 0) === count && !conv.captureError; i++) await Zotero.Promise.delay(200);
+        }
+        const images = conv.images || [];
+        Zotero.debug(`[zoteroaichat] self-test image: overlay removed=${!win.document.getElementById('zoteroaichat-capture')}, images=${images.length} ${JSON.stringify(images.map(i => [i.page, i.width, i.height]))}, error=${conv.captureError}`);
+        if (images.length) {
           const threadId = await this.codex.startThread('');
           let reply = '';
           const done = new Promise(resolve => this.codex.listen(threadId, ({ method, params }) => {
             if (method === 'item/agentMessage/delta') reply += params.delta;
             if (method === 'turn/completed') resolve(params.turn.status);
           }));
-          await this.codex.startTurn(threadId, 'Describe this image from a paper in one sentence.', [conv.image.path]);
+          await this.codex.startTurn(threadId, 'How many images did you receive? Describe each in one short sentence.', images.map(i => i.path));
           Zotero.debug(`[zoteroaichat] self-test image reply (${await done}): ${reply}`);
+          for (const image of images) await IOUtils.remove(image.path, { ignoreAbsent: true });
           this.clearImage(reader.itemID);
         }
         return;
@@ -216,6 +222,12 @@ var AIChatAddon = class {
     const reader = this.readerFor(itemID);
     const win = reader?._internalReader?._primaryView?._iframeWindow;
     if (!win) return;
+    const conv = this.conversation(itemID);
+    if ((conv.images || []).length >= AIChatAddon.MAX_IMAGES) {
+      conv.captureError = `一条消息最多附 ${AIChatAddon.MAX_IMAGES} 张截图`;
+      this.changed(conv);
+      return;
+    }
     const doc = win.document;
     doc.getElementById('zoteroaichat-capture')?.remove();
     const overlay = doc.createElement('div');
@@ -266,9 +278,10 @@ var AIChatAddon = class {
   }
 
   async attachCapture(itemID, reader, rect) {
-    const image = await this.cropRegion(reader, rect);
     const conv = this.conversation(itemID);
-    conv.image = image;
+    if ((conv.images || []).length >= AIChatAddon.MAX_IMAGES) throw new Error(`一条消息最多附 ${AIChatAddon.MAX_IMAGES} 张截图`);
+    const image = await this.cropRegion(reader, rect);
+    conv.images = [...(conv.images || []), image];
     conv.captureError = null;
     this.toggle(Zotero.getMainWindow(), true);
     this.changed(conv);
@@ -308,10 +321,11 @@ var AIChatAddon = class {
     return { path, url: PathUtils.toFileURI(path), page: Number(pageEl.dataset.pageNumber) || null, width: out.width, height: out.height };
   }
 
-  clearImage(itemID) {
+  // Remove one attached screenshot, or all of them when no index is given.
+  clearImage(itemID, index) {
     const conv = this.conversations.get(itemID);
     if (!conv) return;
-    conv.image = null;
+    conv.images = Number.isInteger(index) ? (conv.images || []).filter((_, i) => i !== index) : [];
     conv.captureError = null;
     this.changed(conv);
   }
@@ -421,7 +435,8 @@ var AIChatAddon = class {
       if (!(await IOUtils.exists(path))) return;
       const { messages } = await IOUtils.readJSON(path);
       if (!conv.messages.length && Array.isArray(messages)) {
-        conv.messages = messages;
+        // Older saves kept a single `image` per message.
+        conv.messages = messages.map(({ image, ...m }) => image && !m.images ? { ...m, images: [image] } : m);
         this.changed(conv);
       }
     } catch (error) {
@@ -437,7 +452,7 @@ var AIChatAddon = class {
         return;
       }
       await IOUtils.makeDirectory(PathUtils.parent(path), { ignoreExisting: true });
-      const messages = conv.messages.filter(m => !m.pending).map(({ role, text, quote, image, error, note }) => ({ role, text, quote, image, error, note }));
+      const messages = conv.messages.filter(m => !m.pending).map(({ role, text, quote, images, error, note }) => ({ role, text, quote, images, error, note }));
       await IOUtils.writeJSON(path, { version: 1, messages }, { tmpPath: path + '.tmp' });
     } catch (error) {
       Zotero.logError(error);
@@ -448,9 +463,14 @@ var AIChatAddon = class {
   // An attached image is sent as a local image with the turn; in replayed history only a
   // note that it was there survives.
   promptFor(message, { replay = false } = {}) {
-    const { quote, image, text } = message;
+    const { quote, images = [], text } = message;
     const parts = [];
-    if (image) parts.push(`${replay ? '[An image was attached here: ' : '[Attached image: '}a region cropped from the PDF${image.page ? ` on p. ${image.page}` : ''}]`);
+    if (images.length) {
+      const where = images.map((image, i) => `image ${i + 1}${image.page ? ` from p. ${image.page}` : ''}`).join(', ');
+      parts.push(replay
+        ? `[${images.length} image(s) cropped from the PDF were attached here (${where}); they are no longer available.]`
+        : `[Attached ${images.length} image(s) cropped from the PDF, in order: ${where}.]`);
+    }
     if (quote) parts.push(`Quoted passage from the paper${quote.page ? ` (p. ${quote.page})` : ''}:\n"""\n${quote.text}\n"""`);
     parts.push(text);
     return parts.join('\n\n');
@@ -509,14 +529,16 @@ var AIChatAddon = class {
   async send(itemID, text) {
     const conv = this.conversation(itemID);
     await conv.restored;
-    const { quote, image } = conv;
-    text = text.trim() || (image ? '解释这张图（或表格、公式）的含义。' : quote ? '解释这段文字。' : '');
+    const { quote } = conv;
+    const images = conv.images || [];
+    text = text.trim() || (images.length > 1 ? '比较并解释这几张图（或表格、公式）。'
+      : images.length ? '解释这张图（或表格、公式）的含义。' : quote ? '解释这段文字。' : '');
     if (conv.busy || !text) return;
     Zotero.debug(`[zoteroaichat] send for item ${itemID}`);
     const history = conv.threadId ? [] : conv.messages.map(m => ({ role: m.role, text: m.role === 'user' ? this.promptFor(m, { replay: true }) : m.text }));
-    const message = { role: 'user', text, quote, image };
+    const message = { role: 'user', text, quote, images };
     conv.quote = null;
-    conv.image = null;
+    conv.images = [];
     conv.messages.push(message);
     conv.messages.push({ role: 'assistant', text: '', pending: true });
     conv.busy = true;
@@ -527,7 +549,7 @@ var AIChatAddon = class {
         conv.threadId = await this.codex.startThread(conv.instructions, history);
         this.codex.listen(conv.threadId, event => this.onEvent(conv, event));
       }
-      conv.turnId = await this.codex.startTurn(conv.threadId, this.promptFor(message), image ? [image.path] : []);
+      conv.turnId = await this.codex.startTurn(conv.threadId, this.promptFor(message), images.map(image => image.path));
     } catch (error) {
       Zotero.logError(error);
       this.finishTurn(conv, error.message);
@@ -545,7 +567,7 @@ var AIChatAddon = class {
     const conv = this.conversations.get(itemID);
     if (!conv) return;
     this.stop(itemID);
-    const fresh = { ...conv, threadId: null, turnId: null, busy: false, messages: [], quote: null, image: null };
+    const fresh = { ...conv, threadId: null, turnId: null, busy: false, messages: [], quote: null, images: [] };
     this.conversations.set(itemID, fresh);
     this.changed(fresh);
     this.save(fresh);
@@ -602,6 +624,8 @@ var AIChatAddon = class {
     }
   }
 };
+
+AIChatAddon.MAX_IMAGES = 6;
 
 // Roughly 120k tokens of paper text; keeps room for the conversation itself.
 AIChatAddon.MAX_CONTEXT_CHARS = 480000;

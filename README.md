@@ -2,6 +2,10 @@
 
 Zotero 的 PDF 问答插件。通过本机的 Codex CLI 提问，支持引用原文、截图和添加其他论文。
 
+![在 Zotero 中框选 Transformer 架构图，并在 Ask GPT 侧栏提问](docs/demo.webp)
+
+演示论文：[Attention Is All You Need](https://arxiv.org/abs/1706.03762)（Vaswani 等，2017）。
+
 ## 快速开始
 
 ### 安装

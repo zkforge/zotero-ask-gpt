@@ -1,0 +1,28 @@
+.zoteroaichat-prefs groupbox { margin-bottom: 18px; }
+.zoteroaichat-prefs .field { margin: 6px 0; gap: 10px; }
+.zoteroaichat-prefs .field .name { flex: 0 0 96px; margin: 0; color: var(--fill-secondary); }
+.zoteroaichat-prefs .field.stacked .name { flex: 1; }
+.zoteroaichat-prefs .field input { flex: 1; min-width: 0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+.zoteroaichat-prefs textarea {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 6px;
+  font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  resize: vertical;
+}
+.zoteroaichat-prefs .row { margin: 8px 0; gap: 10px; }
+.zoteroaichat-prefs .hint { margin: 4px 0; color: var(--fill-secondary); font-size: 12px; line-height: 1.5; }
+.zoteroaichat-prefs .path { font-family: ui-monospace, "SF Mono", Menlo, monospace; user-select: text; }
+.zoteroaichat-prefs .usage { margin: 6px 0; }
+.zoteroaichat-prefs .status { color: var(--fill-secondary); font-size: 12px; }
+.zoteroaichat-prefs .status.ok { color: #2e9e4f; }
+.zoteroaichat-prefs .status.error { color: #d93025; }
+.zoteroaichat-prefs button.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-blue);
+  font-size: 12px;
+  cursor: pointer;
+}
+.zoteroaichat-prefs .danger { color: #d93025; }

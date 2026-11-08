@@ -1,0 +1,57 @@
+<vbox id="zoteroaichat-prefs" class="zoteroaichat-prefs main-section" xmlns:html="http://www.w3.org/1999/xhtml">
+  <groupbox>
+    <label><html:h2>连接</html:h2></label>
+    <hbox class="field" align="center">
+      <label class="name" value="Codex 路径"/>
+      <html:input id="zoteroaichat-codex-path" type="text" preference="extensions.zoteroaichat.codexPath" spellcheck="false"/>
+    </hbox>
+    <hbox class="field" align="center">
+      <label class="name" value="代理"/>
+      <html:input id="zoteroaichat-proxy" type="text" preference="extensions.zoteroaichat.proxy" spellcheck="false"/>
+    </hbox>
+    <html:p class="hint">留空时自动检测。代理格式如 http://127.0.0.1:7890 或 socks5h://127.0.0.1:1080。修改后下次发送时生效。</html:p>
+    <hbox class="row" align="center">
+      <button id="zoteroaichat-test" label="测试连接"/>
+      <html:span id="zoteroaichat-test-status" class="status"/>
+    </hbox>
+  </groupbox>
+
+  <groupbox>
+    <label><html:h2>回答</html:h2></label>
+    <hbox class="field" align="center">
+      <label class="name" value="回答语言"/>
+      <menulist id="zoteroaichat-language" preference="extensions.zoteroaichat.language" native="true">
+        <menupopup>
+          <menuitem label="跟随我的提问" value="auto"/>
+          <menuitem label="总是用中文" value="zh"/>
+          <menuitem label="Always in English" value="en"/>
+        </menupopup>
+      </menulist>
+    </hbox>
+    <vbox class="field stacked">
+      <hbox align="center">
+        <label class="name" value="阅读助手提示词" flex="1"/>
+        <html:button id="zoteroaichat-prompt-reset" class="link" type="button">恢复默认</html:button>
+      </hbox>
+      <html:textarea id="zoteroaichat-prompt" rows="9" spellcheck="false"/>
+      <html:p class="hint">决定 AI 怎么回答，包括引用页码的格式。如果删掉引用格式那段，点击引用就只能跳页、无法高亮。修改后对新的提问生效。</html:p>
+    </vbox>
+  </groupbox>
+
+  <groupbox>
+    <label><html:h2>阅读器</html:h2></label>
+    <checkbox label="打开 PDF 时显示侧栏" preference="extensions.zoteroaichat.open" native="true"/>
+    <checkbox label="选中文字时显示「问 AI」按钮" preference="extensions.zoteroaichat.selectionButton" native="true"/>
+    <html:p class="hint">快捷键 ⌘⇧G：开关侧栏；有选中文字时把它作为引用发到侧栏。</html:p>
+  </groupbox>
+
+  <groupbox>
+    <label><html:h2>数据</html:h2></label>
+    <html:p class="hint">对话和截图只保存在本机：<html:span id="zoteroaichat-data-path" class="path"/></html:p>
+    <html:p id="zoteroaichat-data-usage" class="usage"/>
+    <hbox class="row" align="center">
+      <button id="zoteroaichat-reveal" label="打开文件夹"/>
+      <button id="zoteroaichat-clear" class="danger" label="清除所有对话和截图…"/>
+    </hbox>
+  </groupbox>
+</vbox>

@@ -11,7 +11,9 @@ async function startup({ id, version, rootURI }) {
     .registerChrome(Services.io.newURI(rootURI + 'manifest.json'), [['content', 'zoteroaichat', rootURI + 'content/']]);
   for (const file of ['rpc.js', 'codex.js', 'sidebar.js', 'addon.js'])
     Services.scriptloader.loadSubScriptWithOptions(rootURI + 'content/' + file, { target: this, ignoreCache: true });
-  ZoteroAIChat = new AIChatAddon({ id, version });
+  ZoteroAIChat = new AIChatAddon({ id, version, rootURI });
+  // The settings pane runs in the Settings window and reaches the plugin through Zotero.
+  Zotero.AIChat = ZoteroAIChat;
   ZoteroAIChat.startup();
 }
 
@@ -21,6 +23,7 @@ function onMainWindowUnload({ window }) { ZoteroAIChat?.removeWindow(window); }
 function shutdown() {
   ZoteroAIChat?.shutdown();
   ZoteroAIChat = undefined;
+  delete Zotero.AIChat;
   chromeHandle?.destruct();
   chromeHandle = undefined;
 }

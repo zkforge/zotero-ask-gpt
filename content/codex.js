@@ -13,18 +13,25 @@ var CodexService = class {
     return this.ready;
   }
 
+  // The usual install locations; Zotero launched from the Dock has no shell PATH to search.
+  async findCommand() {
+    const home = Services.dirsvc.get('Home', Ci.nsIFile).path;
+    for (const path of ['/opt/homebrew/bin/codex', '/usr/local/bin/codex', PathUtils.join(home, '.local', 'bin', 'codex')])
+      if (await IOUtils.exists(path)) return path;
+    return null;
+  }
+
   async launch() {
     const { Subprocess } = ChromeUtils.importESModule('resource://gre/modules/Subprocess.sys.mjs');
-    const configured = Zotero.Prefs.get('extensions.zoteroaichat.codexPath', true);
-    const candidates = [configured, '/opt/homebrew/bin/codex', '/usr/local/bin/codex', PathUtils.join(Services.dirsvc.get('Home', Ci.nsIFile).path, '.local', 'bin', 'codex')].filter(Boolean);
-    let command = null;
-    for (const path of candidates) if (await IOUtils.exists(path)) { command = path; break; }
-    if (!command) throw new Error('找不到 codex 命令。请先安装 Codex CLI，或在 about:config 设置 extensions.zoteroaichat.codexPath。');
+    const configured = Zotero.Prefs.get('extensions.zoteroaichat.codexPath', true)?.trim();
+    if (configured && !(await IOUtils.exists(configured))) throw new Error(`设置里填写的 codex 路径不存在：${configured}`);
+    const command = configured || await this.findCommand();
+    if (!command) throw new Error('找不到 codex 命令。请先安装 Codex CLI，或在 Ask GPT 设置里填写 codex 路径。');
 
     // Zotero launched from the Dock has no shell PATH or proxy variables; codex is a
     // node script, so its own directory and Homebrew must be on PATH.
     const env = { PATH: [PathUtils.parent(command), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'].join(':') };
-    const proxy = Zotero.Prefs.get('extensions.zoteroaichat.proxy', true) || await this.systemProxy();
+    const proxy = Zotero.Prefs.get('extensions.zoteroaichat.proxy', true)?.trim() || await this.systemProxy();
     if (proxy) Object.assign(env, { HTTPS_PROXY: proxy, HTTP_PROXY: proxy, https_proxy: proxy, http_proxy: proxy });
 
     Zotero.debug(`[zoteroaichat] launching ${command} app-server, proxy=${proxy || 'none'}`);
@@ -57,7 +64,9 @@ var CodexService = class {
       for (const listener of this.threadListeners.values()) listener({ method: 'process/exited', params: { error: exited } });
     })();
 
-    await peer.request('initialize', { clientInfo: { name: 'zotero-ai-chat', title: 'Zotero AI Chat', version: this.version } });
+    const init = await peer.request('initialize', { clientInfo: { name: 'zotero-ai-chat', title: 'Zotero AI Chat', version: this.version } });
+    // userAgent looks like "zotero-ai-chat/0.167.0 (Mac OS …)"; the version is codex's.
+    this.serverVersion = /\/(\d+\.\d+\.\d+)/.exec(init?.userAgent || '')?.[1] || '未知版本';
     peer.notify('initialized');
   }
 

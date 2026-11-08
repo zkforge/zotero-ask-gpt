@@ -46,8 +46,8 @@ Zotero 进程（插件，特权 JS）
 
 ### 环境（GUI 启动的 Zotero 没有 shell 环境）
 
-- codex 路径：依次尝试偏好设置 `extensions.zoteroaichat.codexPath`、`/opt/homebrew/bin/codex`、`/usr/local/bin/codex`、`~/.local/bin/codex`。codex 是 node 脚本，PATH 里要带上它所在目录和 Homebrew。
-- 代理：用 `nsIProtocolProxyService` 解析 `https://chatgpt.com/` 得到系统代理，显式传入 `HTTPS_PROXY` / `HTTP_PROXY`；偏好设置 `extensions.zoteroaichat.proxy` 可以覆盖。
+- codex 路径：设置里填写的路径优先（不存在时直接报错），否则依次尝试 `/opt/homebrew/bin/codex`、`/usr/local/bin/codex`、`~/.local/bin/codex`。codex 是 node 脚本，PATH 里要带上它所在目录和 Homebrew。
+- 代理：用 `nsIProtocolProxyService` 解析 `https://chatgpt.com/` 得到系统代理，显式传入 `HTTPS_PROXY` / `HTTP_PROXY`；设置里填写的代理优先。
 - 子进程用 Firefox 自带的 `Subprocess.sys.mjs`，通过 `/bin/sh -c` 启动 codex，并把 stderr 重定向到 `<Zotero 数据目录>/ai-chat/codex-stderr.log`。stderr 作为 Subprocess 管道时，codex 启动约 50ms 就会被 SIGKILL，且没有任何输出。
 - PathUtils.join 的每个参数只能是单段路径，不能带 `/`。
 
@@ -78,6 +78,21 @@ Zotero 进程（插件，特权 JS）
 - 输入区：引用卡片（解释 / 翻译 / 移除）、多行输入框（Enter 发送，Shift+Enter 换行，输入法组字时不发送），下方是模型和推理强度选择（存在偏好设置里，「默认」表示跟随 `~/.codex/config.toml`）。
 - 快捷键：`⌘⇧G` 开关侧栏；有选区时改为引用选区。
 
+## 设置
+
+用 `Zotero.PreferencePanes.register` 在 Zotero 设置窗口里注册「Ask GPT」面板（`content/prefs.xhtml` / `prefs.js` / `prefs.css`）。
+
+- 连接：codex 路径、代理（留空则自动检测，占位符显示检测结果），「测试连接」会重启 codex，报告 codex 版本和可用模型数。
+- 回答：回答语言（跟随提问 / 中文 / English，作为一行 developer instruction 加在新会话上），阅读助手提示词（默认内容可编辑，「恢复默认」清空偏好）。
+- 阅读器：打开 PDF 时显示侧栏（即侧栏开关状态 `open`），选中文字时显示「问 AI」按钮。
+- 数据：存储位置与占用（对话数、截图数、大小），打开文件夹，清除所有对话和截图（确认后永久删除，Zotero 笔记不受影响）。
+
+实现要点：
+- Zotero 对插件面板强制 `defaultXUL: true`，片段按 XUL 解析：控件用 XUL 的 `checkbox` / `menulist` / `button`，HTML 元素必须加 `html:` 前缀。XUL 按钮用 `command` 事件。
+- 面板脚本在沙箱里、片段插入之前加载；在 document 上以捕获方式监听面板根元素收到的 `load` 再接线。脚本通过 `Zotero.AIChat`（启动时挂上，关闭时删掉）调用插件。
+- `preference` 属性自动双向绑定，读取的是原始偏好值，所以每个被绑定的偏好都在默认分支设了默认值，否则复选框显示未勾选、文本框显示 "undefined"。
+- 偏好观察者：改 codex 路径或代理会重启 codex；改提示词或回答语言只会清掉各对话的 threadId，下次发送时新建会话并回放历史。
+
 ## 文件布局
 
 ```
@@ -88,6 +103,7 @@ content/
   codex.js              app-server 子进程、会话、模型列表
   addon.js              窗口、阅读器事件、论文上下文、对话与持久化
   sidebar.js            XUL 面板挂载与显隐、聊天页桥接
+  prefs.xhtml / prefs.js / prefs.css   Zotero 设置窗口里的「Ask GPT」面板
   chat.html / chat.css / chat.js   聊天界面
   vendor/               marked、KaTeX（含 woff2 字体与许可证）
 test/rpc.test.cjs       node --test test/rpc.test.cjs
@@ -101,4 +117,4 @@ build.sh                打包 dist/zotero-ai-chat-<version>.xpi
 - 开发安装：在 Zotero 配置目录的 `extensions/` 下放一个文本文件，文件名为插件 ID `zotero-ai-chat@local`，内容为源码目录的绝对路径；从 `prefs.js` 删掉 `extensions.lastAppBuildId` / `extensions.lastAppVersion` 以触发重新扫描。改完代码后用 `-purgecaches` 重启 Zotero。
 - Zotero 要求清单里有 `applications.zotero.update_url`，否则会静默跳过插件。侧载的插件默认禁用，需要在插件管理里启用（或在 Zotero 退出时把 `extensions.json` 里对应条目改为 `userDisabled: false`）。
 - 用 `-ZoteroDebugText` 启动 Zotero，可以在 stdout 看到 `[zoteroaichat]` 日志。
-- 偏好设置 `extensions.zoteroaichat.devSelfTest = true` 时，启动后对当前打开的论文做自测：先跳到第 5 页并记录阅读器所在页，再问一个需要引用的问题，检查回复里的 `page:N` 引用数量，依次点开前两处并记录查找结果，最后删掉这轮问答再保存。设为 `"nav"` 时只测页码跳转，不会调用模型；设为 `"image"` 时用模拟鼠标事件在当前页框选上下两块区域，记录裁剪结果，在一次性会话里让模型说出收到几张图并分别描述，然后删除这两张测试截图；设为 `"note"` 时用示例内容走一遍存为笔记，记录笔记位置和 HTML，然后永久删除这条测试笔记。日常使用请关闭。
+- 偏好设置 `extensions.zoteroaichat.devSelfTest = true` 时，启动后对当前打开的论文做自测：先跳到第 5 页并记录阅读器所在页，再问一个需要引用的问题，检查回复里的 `page:N` 引用数量，依次点开前两处并记录查找结果，最后删掉这轮问答再保存。设为 `"nav"` 时只测页码跳转，不会调用模型；设为 `"prefs"` 时打开设置面板，记录各字段、占位符和存储占用，并按一次「测试连接」；设为 `"image"` 时用模拟鼠标事件在当前页框选上下两块区域，记录裁剪结果，在一次性会话里让模型说出收到几张图并分别描述，然后删除这两张测试截图；设为 `"note"` 时用示例内容走一遍存为笔记，记录笔记位置和 HTML，然后永久删除这条测试笔记。日常使用请关闭。

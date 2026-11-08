@@ -1,13 +1,35 @@
 // Global plugin state: windows, reader tabs, and one conversation per PDF attachment.
 var AIChatAddon = class {
-  constructor({ id, version }) {
+  constructor({ id, version, rootURI }) {
     this.id = id;
+    this.rootURI = rootURI;
     this.codex = new CodexService(version);
     this.sidebars = new Map();
     this.conversations = new Map();
   }
 
   startup() {
+    // Defaults for every setting bound in the settings pane (string prefs must exist, or the
+    // pane shows "undefined").
+    const defaults = Services.prefs.getDefaultBranch('extensions.zoteroaichat.');
+    defaults.setBoolPref('open', true);
+    defaults.setBoolPref('selectionButton', true);
+    for (const [name, value] of [['language', 'auto'], ['codexPath', ''], ['proxy', ''], ['baseInstructions', '']])
+      defaults.setStringPref(name, value);
+    this.prefPaneID = Zotero.PreferencePanes.register({
+      pluginID: this.id,
+      label: 'Ask GPT',
+      image: this.rootURI + 'content/icon.svg',
+      src: this.rootURI + 'content/prefs.xhtml',
+      scripts: [this.rootURI + 'content/prefs.js'],
+      stylesheets: [this.rootURI + 'content/prefs.css']
+    });
+    // Connection settings need a new codex process; answer settings only a new thread.
+    this.prefObservers = [
+      ...['codexPath', 'proxy'].map(name => Zotero.Prefs.registerObserver(`extensions.zoteroaichat.${name}`, () => this.restartCodex(), true)),
+      ...['baseInstructions', 'language'].map(name => Zotero.Prefs.registerObserver(`extensions.zoteroaichat.${name}`, () => this.resetThreads(), true))
+    ];
+
     this.tabObserver = Zotero.Notifier.registerObserver({
       notify: event => {
         if (['select', 'load', 'close'].includes(event))
@@ -17,6 +39,7 @@ var AIChatAddon = class {
     for (const win of Zotero.getMainWindows()) this.addWindow(win);
 
     Zotero.Reader.registerEventListener('renderTextSelectionPopup', ({ reader, doc, params, append }) => {
+      if (!Zotero.Prefs.get('extensions.zoteroaichat.selectionButton', true)) return;
       const button = doc.createElement('button');
       button.title = '把选中的文字作为引用发到 AI 侧栏 (⌘⇧G)';
       button.innerHTML = '<span>问 AI</span><kbd style="margin-left:auto;font:inherit;font-size:11px;opacity:.6">⌘⇧G</kbd>';
@@ -53,6 +76,24 @@ var AIChatAddon = class {
       await Zotero.Promise.delay(1000);
       Zotero.debug(`[zoteroaichat] self-test navigate: asked p.5, reader at pageIndex ${reader._internalReader?._state?.primaryViewStats?.pageIndex}`);
       const mode = Zotero.Prefs.get('extensions.zoteroaichat.devSelfTest', true);
+      if (mode === 'prefs') {
+        // Open the settings pane, log what it shows, press "test connection", then close it.
+        const win = Zotero.Utilities.Internal.openPreferences(await this.prefPaneID);
+        let root = null;
+        for (let i = 0; i < 40 && !root?.dataset.ready; i++) {
+          await Zotero.Promise.delay(250);
+          root = win.document?.getElementById('zoteroaichat-prefs');
+        }
+        await Zotero.Promise.delay(1500);
+        const $ = id => root.querySelector('#zoteroaichat-' + id);
+        const checks = [...root.querySelectorAll('checkbox')].map(c => `${c.getAttribute('preference').split('.').pop()}=${c.checked}`);
+        Zotero.debug(`[zoteroaichat] self-test prefs: ready=${root?.dataset.ready}, codex placeholder="${$('codex-path').placeholder}" value="${$('codex-path').value}", proxy placeholder="${$('proxy').placeholder}" value="${$('proxy').value}", language=${$('language').value}, ${checks.join(' ')}, prompt ${$('prompt').value.length} chars, data="${$('data-usage').textContent}" at ${$('data-path').textContent}`);
+        $('test').doCommand();
+        for (let i = 0; i < 60 && /正在|^$/.test($('test-status').textContent); i++) await Zotero.Promise.delay(250);
+        Zotero.debug(`[zoteroaichat] self-test prefs test: ${$('test-status').className} "${$('test-status').textContent}"`);
+        win.close();
+        return;
+      }
       if (mode === 'image') {
         // Drive the real overlay with synthetic mouse events over the visible page, then ask
         // the model about the crop in a throwaway thread.
@@ -131,10 +172,71 @@ var AIChatAddon = class {
   }
 
   shutdown() {
+    for (const symbol of this.prefObservers || []) Zotero.Prefs.unregisterObserver(symbol);
     Zotero.Notifier.unregisterObserver(this.tabObserver);
     for (const win of Zotero.getMainWindows()) this.removeWindow(win);
     this.codex.stop();
     this.conversations.clear();
+  }
+
+  // Settings pane support -------------------------------------------------------
+
+  defaultInstructions() {
+    return CodexService.BASE_INSTRUCTIONS;
+  }
+
+  // Drop every idle conversation's codex thread, so the next message starts a new one under
+  // the current settings (stored history is replayed into it).
+  resetThreads() {
+    for (const conv of this.conversations.values()) if (!conv.busy) conv.threadId = null;
+  }
+
+  restartCodex() {
+    this.codex.stop();
+    for (const conv of this.conversations.values()) {
+      conv.threadId = null;
+      if (conv.busy) this.finishTurn(conv, '设置已更改，请重新发送');
+    }
+  }
+
+  async testConnection() {
+    this.restartCodex();
+    await this.codex.start();
+    return { version: this.codex.serverVersion, models: (await this.codex.listModels()).length };
+  }
+
+  dataDir() {
+    return PathUtils.join(Zotero.DataDirectory.dir, 'ai-chat');
+  }
+
+  async storageUsage() {
+    const dir = this.dataDir();
+    const scan = async (sub, ext) => {
+      const path = PathUtils.join(dir, sub);
+      if (!(await IOUtils.exists(path))) return [0, 0];
+      let count = 0, bytes = 0;
+      for (const child of await IOUtils.getChildren(path)) {
+        if (!child.endsWith(ext)) continue;
+        count++;
+        bytes += (await IOUtils.stat(child)).size;
+      }
+      return [count, bytes];
+    };
+    const [conversations, conversationBytes] = await scan('conversations', '.json');
+    const [images, imageBytes] = await scan('images', '.png');
+    return { dir, conversations, images, bytes: conversationBytes + imageBytes };
+  }
+
+  async revealData() {
+    await IOUtils.makeDirectory(this.dataDir(), { ignoreExisting: true });
+    Zotero.File.reveal(this.dataDir());
+  }
+
+  // Delete every stored conversation and screenshot (the settings pane confirms first).
+  async clearAllData() {
+    for (const itemID of [...this.conversations.keys()]) this.reset(itemID);
+    for (const sub of ['conversations', 'images'])
+      await IOUtils.remove(PathUtils.join(this.dataDir(), sub), { recursive: true, ignoreAbsent: true });
   }
 
   currentReader(win) {
@@ -546,7 +648,8 @@ var AIChatAddon = class {
     try {
       await conv.contextReady;
       if (!conv.threadId) {
-        conv.threadId = await this.codex.startThread(conv.instructions, history);
+        const language = { zh: 'Always reply in Simplified Chinese.', en: 'Always reply in English.' }[Zotero.Prefs.get('extensions.zoteroaichat.language', true)];
+        conv.threadId = await this.codex.startThread([conv.instructions, language].filter(Boolean).join('\n\n'), history);
         this.codex.listen(conv.threadId, event => this.onEvent(conv, event));
       }
       conv.turnId = await this.codex.startTurn(conv.threadId, this.promptFor(message), images.map(image => image.path));

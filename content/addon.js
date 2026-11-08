@@ -6,6 +6,7 @@ var AIChatAddon = class {
     this.codex = new CodexService(version);
     this.sidebars = new Map();
     this.conversations = new Map();
+    this.paperTexts = new Map();
   }
 
   startup() {
@@ -340,14 +341,36 @@ var AIChatAddon = class {
   // highlighted exactly; otherwise jump to the page (1-based, as in the [p.N] markers) and,
   // when a verbatim phrase is given, find it with the reader's search, which scrolls to and
   // highlights the match. A phrase that is not found closes the find bar again.
-  async locate(itemID, { page, text, position }) {
-    const reader = this.readerFor(itemID);
+  // `paper` ("<libraryID>/<attachmentKey>") targets another paper added to the conversation:
+  // its reader tab is reused or opened at the cited page.
+  async locate(itemID, { page, text, position, paper }) {
+    let targetID = itemID;
+    let reader;
+    if (paper) {
+      const [libraryID, key] = paper.split('/');
+      const attachment = Zotero.Items.getByLibraryAndKey(Number(libraryID), key);
+      if (!attachment?.isPDFAttachment() || attachment.deleted) return;
+      targetID = attachment.id;
+      reader = this.readerFor(targetID);
+      if (reader) Zotero.getMainWindow().Zotero_Tabs.select(reader.tabID);
+      else {
+        reader = await Zotero.Reader.open(targetID, { pageIndex: Math.max(page, 1) - 1 });
+        // Zotero selects a restored, unloaded tab without returning its reader.
+        for (let i = 0; i < 100 && !reader; i++) {
+          await Zotero.Promise.delay(50);
+          reader = this.readerFor(targetID);
+        }
+      }
+      await reader?._initPromise;
+    } else {
+      reader = this.readerFor(itemID);
+    }
     if (!reader) return;
     if (position) {
       reader.navigate({ position });
       return;
     }
-    const last = this.conversations.get(itemID)?.pageCount || page;
+    const last = this.conversations.get(targetID)?.pageCount || page;
     await reader.navigate({ pageIndex: Math.min(Math.max(page, 1), last) - 1 });
     if (!text) return;
     const internal = reader._internalReader;
@@ -376,7 +399,10 @@ var AIChatAddon = class {
     const note = new Zotero.Item('note');
     note.libraryID = attachment.libraryID;
     if (attachment.parentItem?.isRegularItem()) note.parentID = attachment.parentID;
-    note.setNote(html.replace(/href="page:(\d+)"/g, (_, page) => `href="${prefix}?page=${page}"`));
+    note.setNote(html
+      .replace(/href="page:(\d+)"/g, (_, page) => `href="${prefix}?page=${page}"`)
+      .replace(/href="paper:(\d+)\/([A-Z0-9]{8})\/(\d+)"/g, (_, libraryID, key, page) =>
+        `href="zotero://open-pdf/${Zotero.API.getLibraryPrefix(Number(libraryID))}/items/${key}?page=${page}"`));
     await note.saveTx();
     message.note = note.key;
     this.changed(conv);
@@ -446,7 +472,7 @@ var AIChatAddon = class {
         return;
       }
       await IOUtils.makeDirectory(PathUtils.parent(path), { ignoreExisting: true });
-      const messages = conv.messages.filter(m => !m.pending).map(({ role, text, quote, images, error, note }) => ({ role, text, quote, images, error, note }));
+      const messages = conv.messages.filter(m => !m.pending).map(({ role, text, quote, images, papers, error, note }) => ({ role, text, quote, images, papers, error, note }));
       await IOUtils.writeJSON(path, { version: 1, messages }, { tmpPath: path + '.tmp' });
     } catch (error) {
       Zotero.logError(error);
@@ -457,8 +483,18 @@ var AIChatAddon = class {
   // An attached image is sent as a local image with the turn; in replayed history only a
   // note that it was there survives.
   promptFor(message, { replay = false } = {}) {
-    const { quote, images = [], text } = message;
+    const { quote, images = [], papers = [], text } = message;
     const parts = [];
+    for (const paper of papers) {
+      const cached = this.paperTexts.get(`${paper.libraryID}/${paper.attachmentKey}`);
+      const cite = `[(${paper.title.split(/[:：]/)[0].slice(0, 40)}, p. N)](paper:${paper.libraryID}/${paper.attachmentKey}/N "phrase copied from that page")`;
+      parts.push([
+        'The user added another paper from their library to this conversation.',
+        cached?.header || `Title: ${paper.title}`,
+        `Cite this paper as ${cite}, not with page: links (those point to the paper open in the reader).`,
+        cached?.body ? `Full text, with [p.N] marking the start of PDF page N:\n\n${cached.body}` : '(Its full text could not be extracted; only the metadata above is available.)'
+      ].join('\n'));
+    }
     if (images.length) {
       const where = images.map((image, i) => `image ${i + 1}${image.page ? ` from p. ${image.page}` : ''}`).join(', ');
       parts.push(replay
@@ -470,57 +506,124 @@ var AIChatAddon = class {
     return parts.join('\n\n');
   }
 
-  // Builds the developer instructions for the paper: metadata plus full text with
-  // [p.N] page markers. Extraction starts as soon as the paper's conversation exists.
-  async loadContext(conv) {
-    const item = Zotero.Items.get(conv.itemID);
-    const parent = item?.parentItem || item;
+  // Title, authors, date and abstract of the regular item an attachment belongs to.
+  paperHeader(attachment) {
+    const parent = attachment?.parentItem || attachment;
     const authors = parent?.getCreators?.().map(c => [c.firstName, c.lastName].filter(Boolean).join(' ') || c.name).filter(Boolean).join(', ');
-    const header = [
-      'The user is reading this paper in the Zotero PDF reader.',
-      `Title: ${conv.title}`,
+    return [
+      `Title: ${parent?.getDisplayTitle() || 'Untitled'}`,
       authors && `Authors: ${authors}`,
       parent?.getField?.('date') && `Date: ${parent.getField('date')}`,
       parent?.getField?.('abstractNote') && `Abstract: ${parent.getField('abstractNote')}`
     ].filter(Boolean).join('\n');
+  }
 
-    let body = '';
+  // Full text of a PDF attachment with [p.N] marking the start of each page, cut after
+  // maxChars. state: full | truncated | scanned | failed.
+  async paperText(attachment, maxChars) {
     try {
-      if (!item?.isPDFAttachment()) throw new Error('not a PDF');
-      const { text } = await Zotero.PDFWorker.getFullText(conv.itemID, null);
+      if (!attachment?.isPDFAttachment()) throw new Error('not a PDF');
+      const { text } = await Zotero.PDFWorker.getFullText(attachment.id, null);
       const pages = text.split('\f');
-      if (!text.trim()) {
-        conv.notice = '没有可提取的文字（可能是扫描件）';
-        conv.noticeLevel = 'warn';
-        conv.status = { state: 'scanned', pages: pages.length };
-      } else {
-        body = pages.map((page, i) => `[p.${i + 1}]\n${page.trim()}`).join('\n\n');
-        conv.pageCount = pages.length;
-        conv.notice = `已读取全文 · ${pages.length} 页`;
-        conv.noticeLevel = 'ok';
-        conv.status = { state: 'full', pages: pages.length };
-        if (body.length > AIChatAddon.MAX_CONTEXT_CHARS) {
-          body = body.slice(0, AIChatAddon.MAX_CONTEXT_CHARS);
-          const lastPage = [...body.matchAll(/^\[p\.(\d+)\]$/gm)].pop()?.[1];
-          body += `\n\n[Full text truncated after p.${lastPage}; later pages are not available.]`;
-          conv.notice = `篇幅过长，已读取前 ${lastPage} / ${pages.length} 页`;
-          conv.noticeLevel = 'warn';
-          conv.status = { state: 'truncated', pages: pages.length, readPages: Number(lastPage) };
-        }
-      }
+      if (!text.trim()) return { state: 'scanned', pages: pages.length, body: '' };
+      let body = pages.map((page, i) => `[p.${i + 1}]\n${page.trim()}`).join('\n\n');
+      if (body.length <= maxChars) return { state: 'full', pages: pages.length, body };
+      body = body.slice(0, maxChars);
+      const readPages = Number([...body.matchAll(/^\[p\.(\d+)\]$/gm)].pop()?.[1]);
+      body += `\n\n[Full text truncated after p.${readPages}; later pages are not available.]`;
+      return { state: 'truncated', pages: pages.length, readPages, body };
     } catch (error) {
       Zotero.logError(error);
-      conv.notice = '未能提取全文，仅有题录信息';
-      conv.noticeLevel = 'warn';
-      conv.status = { state: 'failed' };
+      return { state: 'failed', body: '' };
     }
+  }
+
+  // Builds the developer instructions for the paper: metadata plus full text with
+  // [p.N] page markers. Extraction starts as soon as the paper's conversation exists.
+  async loadContext(conv) {
+    const item = Zotero.Items.get(conv.itemID);
+    const header = `The user is reading this paper in the Zotero PDF reader.\n${this.paperHeader(item)}`;
+    const { state, pages, readPages, body } = await this.paperText(item, AIChatAddon.MAX_CONTEXT_CHARS);
+    conv.status = { state, pages, readPages };
+    if (pages) conv.pageCount = pages;
+    [conv.notice, conv.noticeLevel] = {
+      full: [`已读取全文 · ${pages} 页`, 'ok'],
+      truncated: [`篇幅过长，已读取前 ${readPages} / ${pages} 页`, 'warn'],
+      scanned: ['没有可提取的文字（可能是扫描件）', 'warn'],
+      failed: ['未能提取全文，仅有题录信息', 'warn']
+    }[state];
     conv.instructions = body
       ? `${header}\n\nFull text of the PDF, with [p.N] marking the start of PDF page N:\n\n${body}`
       : header;
-    // Rough size for the status line until codex reports real usage: CJK characters count
-    // about one token each, other text about four characters per token.
-    const cjk = (conv.instructions.match(/[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]/g) || []).length;
-    conv.paperTokens = Math.round(cjk + (conv.instructions.length - cjk) / 4);
+    conv.paperTokens = AIChatAddon.estimateTokens(conv.instructions);
+    this.changed(conv);
+  }
+
+  // Papers the user can add to the conversation, grouped for the "+" menu: the paper's
+  // related items first (empty query only), then each library, newest first. Only items
+  // with a PDF, excluding the paper being read.
+  async searchPapers(itemID, query) {
+    const current = Zotero.Items.get(itemID);
+    const currentParent = current?.parentItem || current;
+    const toEntry = async item => {
+      if (!item?.isRegularItem() || item.id === currentParent?.id || item.deleted) return null;
+      const pdf = await item.getBestAttachment();
+      if (!pdf?.isPDFAttachment()) return null;
+      const year = Zotero.Date.strToDate(item.getField('date') || '').year;
+      return { libraryID: item.libraryID, key: item.key, attachmentKey: pdf.key, title: item.getDisplayTitle(), meta: [item.firstCreator, year].filter(Boolean).join(' · ') };
+    };
+    const collect = async (items, limit) => {
+      const papers = [];
+      for (const item of items) {
+        if (papers.length >= limit) break;
+        const entry = await toEntry(item);
+        if (entry) papers.push(entry);
+      }
+      return papers;
+    };
+    const groups = [];
+    const q = query.trim();
+    if (!q && currentParent?.isRegularItem()) {
+      const related = currentParent.relatedItems.map(key => Zotero.Items.getByLibraryAndKey(currentParent.libraryID, key));
+      const papers = await collect(related, 20);
+      if (papers.length) groups.push({ label: '相关条目', papers });
+    }
+    for (const library of Zotero.Libraries.getAll().filter(l => ['user', 'group'].includes(l.libraryType))) {
+      const search = new Zotero.Search();
+      search.libraryID = library.libraryID;
+      if (q) search.addCondition('quicksearch-titleCreatorYear', 'contains', q);
+      for (const type of ['attachment', 'note', 'annotation']) search.addCondition('itemType', 'isNot', type);
+      const items = (await Zotero.Items.getAsync(await search.search()))
+        .sort((a, b) => (a.dateAdded < b.dateAdded ? 1 : -1));
+      const papers = await collect(items, q ? 50 : 30);
+      if (papers.length) groups.push({ label: library.libraryType === 'user' ? '我的文库' : library.name, papers });
+    }
+    return groups;
+  }
+
+  // Full text of added papers, cached by attachment so prompts can be built synchronously.
+  async loadPapers(papers) {
+    for (const paper of papers) {
+      const id = `${paper.libraryID}/${paper.attachmentKey}`;
+      if (this.paperTexts.has(id)) continue;
+      const attachment = Zotero.Items.getByLibraryAndKey(paper.libraryID, paper.attachmentKey);
+      const { body, ...status } = await this.paperText(attachment, AIChatAddon.MAX_ATTACHED_CHARS);
+      this.paperTexts.set(id, { header: this.paperHeader(attachment), body, status });
+    }
+  }
+
+  addPaper(itemID, paper) {
+    const conv = this.conversation(itemID);
+    const papers = conv.papers || [];
+    if (papers.some(p => p.key === paper.key && p.libraryID === paper.libraryID)) return;
+    conv.papers = [...papers, paper];
+    this.changed(conv);
+  }
+
+  removePaper(itemID, index) {
+    const conv = this.conversations.get(itemID);
+    if (!conv) return;
+    conv.papers = (conv.papers || []).filter((_, i) => i !== index);
     this.changed(conv);
   }
 
@@ -533,13 +636,16 @@ var AIChatAddon = class {
     await conv.restored;
     const { quote } = conv;
     const images = conv.images || [];
+    const papers = conv.papers || [];
     text = text.trim() || (images.length > 1 ? '比较并解释这几张图（或表格、公式）。'
-      : images.length ? '解释这张图（或表格、公式）的含义。' : quote ? '解释这段文字。' : '');
+      : images.length ? '解释这张图（或表格、公式）的含义。' : quote ? '解释这段文字。'
+      : papers.length ? '附加的论文和当前这篇有什么关系？各自的方法和结论有什么异同？' : '');
     if (conv.busy || !text) return;
     Zotero.debug(`[zoteroaichat] send for item ${itemID}`);
     conv.quote = null;
     conv.images = [];
-    await this.ask(conv, { role: 'user', text, quote, images });
+    conv.papers = [];
+    await this.ask(conv, { role: 'user', text, quote, images, papers });
   }
 
   // Ask the last question again, or an edited version of it, on a fresh thread whose replayed
@@ -558,13 +664,17 @@ var AIChatAddon = class {
   // Run one question: append it with a pending reply, start a thread if there is none
   // (replaying the earlier messages into it), then start the turn.
   async ask(conv, message) {
-    const history = conv.threadId ? [] : conv.messages.map(m => ({ role: m.role, text: m.role === 'user' ? this.promptFor(m, { replay: true }) : m.text }));
+    const earlier = conv.threadId ? [] : [...conv.messages];
     const images = message.images || [];
     conv.messages.push(message);
     conv.messages.push({ role: 'assistant', text: '', pending: true });
     conv.busy = true;
     this.changed(conv);
     try {
+      // Added papers' full text goes into the prompt, including in replayed history.
+      await this.loadPapers([...earlier, message].flatMap(m => m.papers || []));
+      this.changed(conv);
+      const history = earlier.map(m => ({ role: m.role, text: m.role === 'user' ? this.promptFor(m, { replay: true }) : m.text }));
       await conv.contextReady;
       if (!conv.threadId) {
         const language = { zh: 'Always reply in Simplified Chinese.', en: 'Always reply in English.' }[Zotero.Prefs.get('extensions.zoteroaichat.language', true)];
@@ -589,7 +699,7 @@ var AIChatAddon = class {
     const conv = this.conversations.get(itemID);
     if (!conv) return;
     this.stop(itemID);
-    const fresh = { ...conv, threadId: null, turnId: null, busy: false, messages: [], quote: null, images: [] };
+    const fresh = { ...conv, threadId: null, turnId: null, busy: false, messages: [], quote: null, images: [], papers: [] };
     this.conversations.set(itemID, fresh);
     this.changed(fresh);
     this.save(fresh);
@@ -655,6 +765,16 @@ var AIChatAddon = class {
 };
 
 AIChatAddon.MAX_IMAGES = 6;
+
+// Each added paper's text is capped lower than the paper being read.
+AIChatAddon.MAX_ATTACHED_CHARS = 200000;
+
+// Rough token count for status display: CJK characters count about one token each, other
+// text about four characters per token.
+AIChatAddon.estimateTokens = text => {
+  const cjk = (text.match(/[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]/g) || []).length;
+  return Math.round(cjk + (text.length - cjk) / 4);
+};
 
 // Roughly 120k tokens of paper text; keeps room for the conversation itself.
 AIChatAddon.MAX_CONTEXT_CHARS = 480000;

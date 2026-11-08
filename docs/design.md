@@ -55,13 +55,14 @@ Zotero 进程（插件，特权 JS）
 
 - 全文：打开论文时就用 `Zotero.PDFWorker.getFullText(attachmentID, null)` 提取。页之间用 `\f` 分隔，据此给每页加 `[p.N]` 标记（PDF 页码），和标题、作者、日期、摘要一起写入 `developerInstructions`。
 - 长度：超过 48 万字符时截断，在上下文和侧栏里都写明读到了第几页。
+- 附加论文：输入框旁的「+」可以按标题、作者或年份搜索个人和群组文库中带 PDF 的条目。打开菜单时优先显示当前论文的相关条目。选中的论文随下一条消息发送，每篇正文最多 20 万字符，并带页码标记。状态栏显示已附加篇数，悬停可查看每篇的读取结果。
 - 选区：`renderTextSelectionPopup` 加「问 AI」按钮，`createViewContextMenu` 加菜单项，`⌘⇧G` 在有选区时也会引用。选区取自 `annotation.text` 和 `annotation.position.pageIndex`，显示成引用卡片；发送时拼成 `Quoted passage from the paper (p. N): """…"""` 加上用户问题。
 - 扫描版 PDF 提取不到文字时，在侧栏显示提示，仍然可以对话。
 
 ### 会话持久化
 
-- 每篇论文一个 JSON 文件：`<Zotero 数据目录>/ai-chat/conversations/<libraryID>-<itemKey>.json`，内容为 `{ version: 1, messages: [{ role, text, quote, error }] }`。每轮回复结束后写入。
-- 打开论文时读回消息并显示。之后第一次发送时新建 ephemeral 会话，用 `thread/inject_items` 回放历史。
+- 每篇论文一个 JSON 文件：`<Zotero 数据目录>/ai-chat/conversations/<libraryID>-<itemKey>.json`。每轮回复结束后写入，附加论文只保存条目和附件信息，正文留在内存缓存中。
+- 打开论文时读回消息并显示。之后第一次发送时重新提取历史消息中附加的论文正文，再新建 ephemeral 会话，用 `thread/inject_items` 回放历史。
 - 「新对话」按钮清空消息并删除文件，这个对话里的截图文件也一起删除（笔记里只有页码链接，不引用截图文件）。已提取的全文继续复用。
 
 ### 界面
@@ -75,6 +76,7 @@ Zotero 进程（插件，特权 JS）
 - 消息区：AI 回复用 vendored 的 marked 15 + KaTeX 0.16 渲染，悬停时显示「复制」。空对话时给出三个常用问题。
 - 页码跳转与高亮：系统提示词要求模型把每处引用写成 `[(p. 3)](page:3 "该页原文中连续 4–12 个词")`，短语保持原文语言、不翻译。渲染时 `page:N` 链接显示为 (p. 3)，短语放在 `data-quote` 里。点击后先 `reader.navigate({ pageIndex })` 跳到该页，再写入阅读器的 `primaryViewFindState`（通过 `_internalReader._updateState`，对象用 `cloneInto` 放进阅读器 iframe），触发 pdf.js 短语查找：滚到匹配处并高亮，同时打开查找栏，按 Esc 关闭。约 1.5 秒后若 `result.total === 0`，就关掉查找栏，只停在该页。用户自己的引用保存了选区的 `position`（页码 + 矩形），点击时用 `reader.navigate({ position })` 精确高亮。普通文字里的 (p. 3)、pp. 23–25、第 3 页（跳过代码和公式）只跳页。页码与上下文中的 `[p.N]` 一致，范围跳到起始页。
 - 截图提问：输入框左下角的截图按钮会在 pdf.js 文档里盖一层遮罩，拖动框选区域，滚轮照常滚动 PDF，Esc 取消。框选结束后按几何位置找到中心点所在的 `.page`（Zotero 禁用了页面的 pointer events，`elementsFromPoint` 取不到），从页面已渲染的 canvas 上按 canvas 像素比例裁剪，存为 `<Zotero 数据目录>/ai-chat/images/*.png`。每次截图追加到输入框上方的缩略图行（每张带页码角标和单独的 ×），一条消息最多 6 张。发送时按顺序作为多个 `localImage` 和文字一起传给 codex，提示词里注明每张图来自第几页。空输入时，一张图默认「解释这张图」，多张默认「比较并解释这几张图」。消息里保存 `images` 数组（旧存档的单个 `image` 读入时会转换），缩略图点击可跳到对应页。回放历史时图片只剩一句说明，所以重启后模型看不到旧截图。截图清晰度取决于当前缩放：屏幕上越大，图越清楚。
+- 附加论文的引用使用 `paper:<libraryID>/<attachmentKey>/<page>`。点击会打开或切换到目标 PDF，在对应页查找原文短语。存为笔记时，跨论文引用也会转换为 `zotero://open-pdf` 链接。
 - 存为笔记：每条回答下有「存为笔记」。聊天页把这一轮问答渲染成笔记 HTML：标题是问题，引用放进 blockquote，正文由第二个 marked 实例生成，公式写成笔记编辑器的 `<span class="math">$…$</span>` 和 `<pre class="math">$$…$$</pre>`，页码引用写成 `page:N` 链接，末尾注明模型和时间。插件把 `page:N` 换成 `zotero://open-pdf/<库前缀>/items/<附件 key>?page=N`，作为论文父条目的子笔记保存（PDF 没有父条目时存为独立笔记），并把笔记 key 记在这条消息上。之后按钮变成「查看笔记」，用 `ZoteroPane.openNoteWindow` 在新窗口打开；笔记已被删除时恢复成「存为笔记」。
 - 安全：聊天页是 chrome 特权页面，模型输出不能变成可执行的标记。原始 HTML 一律转义；链接只保留 http(s)，并用 `Zotero.launchURL` 在系统浏览器打开；图片只显示替代文字。
 - 输入区：引用卡片（解释 / 翻译 / 移除）、多行输入框（Enter 发送，Shift+Enter 换行，输入法组字时不发送），下方是模型和推理强度选择（存在偏好设置里，「默认」表示跟随 `~/.codex/config.toml`）。

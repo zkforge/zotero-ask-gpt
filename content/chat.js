@@ -1,5 +1,5 @@
 // Chat view. Registers with the sidebar that owns this frame, which then calls
-// `window.render(conversation)`; `host` carries the actions back.
+// `window.render(conversation, paperTexts)`; `host` carries the actions back.
 const $ = id => document.getElementById(id);
 const input = $('input');
 const send = $('send');
@@ -14,7 +14,9 @@ const ICONS = {
   check: '<path d="M3.5 8.5l3 3 6-7"/>',
   note: '<path d="M4.5 2.5h5l2.5 2.5v8.5h-7.5z"/><path d="M6.5 7.5h3.5M6.5 10h3.5"/>',
   retry: '<path d="M12.8 6.5A5 5 0 1 0 13 9.2"/><path d="M13 3v3.5H9.5"/>',
-  edit: '<path d="M10.5 3.5l2 2-6.5 6.5H4v-2z"/><path d="M9 5l2 2"/>'
+  edit: '<path d="M10.5 3.5l2 2-6.5 6.5H4v-2z"/><path d="M9 5l2 2"/>',
+  doc: '<path d="M4.5 2.5h5l2.5 2.5v8.5h-7.5z"/><path d="M9.5 2.5V5H12"/>',
+  close: '<path d="M5 5l6 6M11 5l-6 6"/>'
 };
 const icon = (name, className = '') => `<svg class="${className}" viewBox="0 0 16 16" aria-hidden="true">${ICONS[name]}</svg>`;
 const SUGGESTIONS = ['总结这篇论文的问题、方法和结论', '这篇论文的主要贡献是什么？', '这篇论文有哪些局限？'];
@@ -34,7 +36,8 @@ function locateFrom(node) {
   window.host?.locate({
     page,
     text: node.dataset.quote || '',
-    position: node.dataset.position ? JSON.parse(node.dataset.position) : null
+    position: node.dataset.position ? JSON.parse(node.dataset.position) : null,
+    paper: node.dataset.paper || null
   });
 }
 
@@ -75,7 +78,7 @@ function startEdit(node, message) {
   const save = element('button', 'primary-action', '发送');
   const actions = element('div', 'edit-actions');
   actions.append(cancel, save);
-  const finish = () => { renderedMessages.delete(message); window.render(lastConv); };
+  const finish = () => { renderedMessages.delete(message); window.render(lastConv, lastPaperTexts); };
   cancel.addEventListener('click', finish);
   save.addEventListener('click', () => window.host?.rerun(box.value));
   box.addEventListener('keydown', event => {
@@ -107,6 +110,20 @@ function messageNode(message, index, last) {
       grid.append(image);
     }
     content.append(grid);
+  }
+  if (message.papers?.length) {
+    const list = element('div', 'msg-papers');
+    for (const paper of message.papers) {
+      const chip = element('span', 'paper-chip');
+      chip.innerHTML = icon('doc');
+      chip.append(element('span', 'title', paper.title));
+      chip.title = `打开《${paper.title}》`;
+      chip.dataset.page = '1';
+      chip.dataset.paper = `${paper.libraryID}/${paper.attachmentKey}`;
+      chip.addEventListener('click', () => locateFrom(chip));
+      list.append(chip);
+    }
+    content.append(list);
   }
   if (message.quote) content.append(quoteBlock(message.quote));
   if (message.role === 'assistant') {
@@ -154,7 +171,7 @@ function messageNode(message, index, last) {
 
 // Short status items under the title: how much of the paper the model has, and how full the
 // context was on the last request (an estimate of the paper's size before the first one).
-function statusChips(conv) {
+function statusChips(conv, paperTexts) {
   const chip = (text, kind = '', title = '') => {
     const node = element('span', `chip ${kind}`.trim(), text);
     if (title) node.title = title;
@@ -175,6 +192,23 @@ function statusChips(conv) {
   } else if (conv.paperTokens && state !== 'loading') {
     chips.push(chip(`约 ${tokens(conv.paperTokens)} tokens`, '', '论文放进上下文后的估计大小'));
   }
+  const papers = new Map((conv.messages || []).flatMap(m => (m.papers || []).map(p => [`${p.libraryID}/${p.attachmentKey}`, p.title])));
+  if (papers.size) {
+    let warn = false;
+    const lines = [];
+    for (const [id, title] of papers) {
+      const { state, pages, readPages } = paperTexts.get(id)?.status || {};
+      const detail = {
+        full: `已读取全文（${pages} 页）`,
+        truncated: `正文截断（读至第 ${readPages}/${pages} 页）`,
+        scanned: '无可提取文字，仅题录',
+        failed: '正文读取失败，仅题录'
+      }[state] || '正文尚未载入';
+      if (state && state !== 'full') warn = true;
+      lines.push(`${title} · ${detail}`);
+    }
+    chips.push(chip(`+${papers.size} 篇论文`, warn ? 'warn' : '', lines.join('\n')));
+  }
   return chips;
 }
 
@@ -184,13 +218,16 @@ function greeting() {
 }
 
 let lastConv = null;
+let lastPaperTexts = null;
 const renderedMessages = new WeakMap();
 
-window.render = conv => {
+window.render = (conv, paperTexts = new Map()) => {
+  if (lastConv && lastConv.itemID !== conv.itemID) closePaperMenu();
   lastConv = conv;
+  lastPaperTexts = paperTexts;
   $('title').textContent = conv.title;
   $('title').title = conv.title;
-  $('status').replaceChildren(...statusChips(conv));
+  $('status').replaceChildren(...statusChips(conv, paperTexts));
   busy = conv.busy;
   send.classList.toggle('stop', busy);
   send.title = busy ? '停止生成' : '发送';
@@ -219,7 +256,22 @@ window.render = conv => {
   $('capture-error').hidden = !conv.captureError;
   $('capture-error').textContent = conv.captureError || '';
 
-  hasQuote = !!conv.quote || images.length > 0;
+  const papers = conv.papers || [];
+  $('paper-card').hidden = !papers.length;
+  $('paper-card').replaceChildren(...papers.map((paper, i) => {
+    const chip = element('span', 'paper-chip');
+    chip.innerHTML = icon('doc');
+    chip.append(element('span', 'title', paper.title));
+    chip.title = [paper.title, paper.meta].filter(Boolean).join(' · ');
+    const remove = element('button', 'icon small');
+    remove.title = '移除这篇论文';
+    remove.setAttribute('aria-label', remove.title);
+    remove.innerHTML = icon('close');
+    remove.addEventListener('click', () => window.host?.removePaper(i));
+    chip.append(remove);
+    return chip;
+  }));
+  hasQuote = !!conv.quote || images.length > 0 || papers.length > 0;
   $('quote').hidden = !conv.quote;
   if (conv.quote) {
     $('quote-page').textContent = conv.quote.page ? `引用 · 第 ${conv.quote.page} 页` : '引用';
@@ -229,7 +281,8 @@ window.render = conv => {
     label.dataset.position = conv.quote.position ? JSON.stringify(conv.quote.position) : '';
     $('quote-body').replaceChildren(element('div', 'quote-text', conv.quote.text));
   }
-  input.placeholder = images.length > 1 ? `针对这 ${images.length} 张图提问，直接发送即比较解释`
+  input.placeholder = papers.length && !images.length && !conv.quote ? '结合附加的论文提问…'
+    : images.length > 1 ? `针对这 ${images.length} 张图提问，直接发送即比较解释`
     : images.length ? '针对这张图提问，直接发送即解释'
     : conv.quote ? '针对这段文字提问，直接发送即解释' : '问问这篇论文…';
 
@@ -253,7 +306,7 @@ window.render = conv => {
     const lastUser = conv.messages.map(m => m.role).lastIndexOf('user');
     const nodes = conv.messages.map((message, i) => {
       const last = !conv.busy && i >= lastUser;
-      const signature = JSON.stringify([i, last, message.text, message.pending, message.error, message.note, message.quote, message.images]);
+      const signature = JSON.stringify([i, last, message.text, message.pending, message.error, message.note, message.quote, message.images, message.papers]);
       const cached = renderedMessages.get(message);
       if (cached?.signature === signature) return cached.node;
       const node = messageNode(message, i, last);
@@ -313,6 +366,7 @@ function menuItem({ name, tag, key, checked, onClick }) {
 }
 
 function openMenu(kind) {
+  closePaperMenu();
   const button = kind === 'model' ? modelButton : effortButton;
   const list = element('div', 'menu-list');
   if (kind === 'model') {
@@ -366,6 +420,7 @@ for (const [button, kind] of [[modelButton, 'model'], [effortButton, 'effort']])
 }
 document.addEventListener('click', event => {
   if (!menu.hidden && !menu.contains(event.target)) closeMenu();
+  if (!paperMenu.hidden && !paperMenu.contains(event.target) && event.target.closest('#add-paper') !== addPaperButton) closePaperMenu();
 });
 document.addEventListener('keydown', event => {
   if (menu.hidden) return;
@@ -382,6 +437,98 @@ document.addEventListener('keydown', event => {
     const next = items[(items.indexOf(document.activeElement) + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length];
     event.preventDefault();
     next?.focus();
+  }
+});
+
+// Paper picker: search the library and add papers to the next message ----------
+
+const paperMenu = $('paper-menu');
+const paperSearch = $('paper-search');
+const paperResults = $('paper-results');
+const addPaperButton = $('add-paper');
+let paperQuery = 0;
+let paperTimer = null;
+
+async function refreshPapers() {
+  const query = paperSearch.value;
+  const ticket = ++paperQuery;
+  let groups;
+  try { groups = await window.host.searchPapers(query); }
+  catch (error) { window.host?.logError(error); groups = []; }
+  if (ticket !== paperQuery) return;
+  const added = new Set((lastConv?.papers || []).map(p => `${p.libraryID}/${p.key}`));
+  const nodes = [];
+  for (const group of groups) {
+    const papers = group.papers.filter(p => !added.has(`${p.libraryID}/${p.key}`));
+    if (!papers.length) continue;
+    nodes.push(element('div', 'menu-label', group.label));
+    for (const paper of papers) {
+      const option = element('button', 'paper-option');
+      option.setAttribute('role', 'option');
+      option.innerHTML = icon('doc');
+      const text = element('span', 'text');
+      text.append(element('span', 'title', paper.title));
+      if (paper.meta) text.append(element('span', 'meta', paper.meta));
+      option.append(text);
+      option.title = paper.title;
+      option.addEventListener('click', event => {
+        event.stopPropagation();
+        window.host?.addPaper(paper);
+        closePaperMenu();
+        input.focus();
+      });
+      nodes.push(option);
+    }
+  }
+  if (!nodes.length) nodes.push(element('div', 'empty-note', query.trim() ? '没有找到带 PDF 的论文' : '文库里还没有其他带 PDF 的论文'));
+  paperResults.replaceChildren(...nodes);
+  paperResults.querySelector('.paper-option')?.classList.add('active');
+}
+
+function openPaperMenu() {
+  closeMenu();
+  paperSearch.value = '';
+  paperResults.replaceChildren(element('div', 'empty-note', '正在读取文库…'));
+  paperMenu.hidden = false;
+  addPaperButton.setAttribute('aria-expanded', 'true');
+  paperSearch.focus();
+  refreshPapers();
+}
+
+function closePaperMenu() {
+  paperMenu.hidden = true;
+  addPaperButton.setAttribute('aria-expanded', 'false');
+  paperQuery++;
+  clearTimeout(paperTimer);
+}
+
+addPaperButton.addEventListener('click', event => {
+  event.stopPropagation();
+  if (paperMenu.hidden) openPaperMenu(); else closePaperMenu();
+});
+paperSearch.addEventListener('input', () => {
+  paperQuery++;
+  clearTimeout(paperTimer);
+  paperResults.replaceChildren(element('div', 'empty-note', '正在搜索…'));
+  paperTimer = setTimeout(refreshPapers, 150);
+});
+paperMenu.addEventListener('keydown', event => {
+  const options = [...paperResults.querySelectorAll('.paper-option')];
+  const current = options.findIndex(o => o.classList.contains('active'));
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    closePaperMenu();
+    addPaperButton.focus();
+  } else if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && options.length) {
+    event.preventDefault();
+    const next = (current + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+    options[current]?.classList.remove('active');
+    options[next].classList.add('active');
+    options[next].scrollIntoView({ block: 'nearest' });
+  } else if (event.key === 'Enter' && !event.isComposing && current >= 0) {
+    event.preventDefault();
+    options[current].click();
   }
 });
 

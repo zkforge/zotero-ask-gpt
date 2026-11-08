@@ -69,6 +69,13 @@ test('renderMarkdown: math renders, dollars in prose and code do not', () => {
   equal(box.querySelector('code').textContent, 'cost $3', 'code dollars');
 });
 
+test('renderMarkdown: paper: links cite another paper with its key and phrase', () => {
+  const box = html(renderMarkdown('[(World Models, p. 4)](paper:1/AB12CD34/4 "latent dynamics model") and [bad](paper:1/xx/4) [bad2](paper:1/AB12CD34/4" onclick="x)'));
+  const links = [...box.querySelectorAll('a')];
+  equal(links.map(a => [a.dataset.paper, a.dataset.page, a.dataset.quote, a.textContent]), [['1/AB12CD34', '4', 'latent dynamics model', '(World Models, p. 4)']]);
+  equal(box.querySelectorAll('[onclick]').length, 0, 'no injected handler');
+});
+
 test('extractMath: underscores and stars inside math survive Markdown', () => {
   // Display math is pulled out first, so placeholder numbers need not follow reading order;
   // each placeholder must map to its own formula.
@@ -87,15 +94,21 @@ test('noteMarkdownHTML: note-editor math nodes and page links', () => {
   equal(box.querySelectorAll('.katex, p > pre').length, 0, 'no katex, no pre inside p');
 });
 
+test('noteMarkdownHTML: paper: links stay as paper: links for the plugin to rewrite', () => {
+  const box = html(noteMarkdownHTML('See [(Other, p. 7)](paper:2/ZZ99YY88/7 "x").'));
+  equal([...box.querySelectorAll('a')].map(a => a.getAttribute('href')), ['paper:2/ZZ99YY88/7']);
+});
+
 test('buildNote: question, quote, screenshots, answer and footer', () => {
   const conv = { title: 'Paper', messages: [
-    { role: 'user', text: 'Why <this>?', quote: { page: 3, text: 'a quoted line' }, images: [{ page: 5 }] },
+    { role: 'user', text: 'Why <this>?', quote: { page: 3, text: 'a quoted line' }, images: [{ page: 5 }], papers: [{ libraryID: 1, attachmentKey: 'AB12CD34', title: 'Other <paper>' }] },
     { role: 'assistant', text: 'Because [(p. 3)](page:3 "x").' }
   ] };
   const box = html(buildNote(conv, 1, 'GPT-6.1-Sol', '2026年11月8日 14:00'));
   equal(box.querySelector('h1').textContent, 'Why <this>?', 'title');
   equal(box.querySelector('blockquote').textContent, 'a quoted line', 'quote');
-  equal([...box.querySelectorAll('a')].map(a => a.getAttribute('href')), ['page:5', 'page:3', 'page:3'], 'links');
+  equal([...box.querySelectorAll('a')].map(a => a.getAttribute('href')), ['paper:1/AB12CD34/1', 'page:5', 'page:3', 'page:3'], 'links');
+  equal(box.querySelector('a').textContent, 'Other <paper>', 'paper title escaped as text');
   equal(box.lastElementChild.textContent, '— Ask GPT · GPT-6.1-Sol · 2026年11月8日 14:00', 'footer');
 });
 

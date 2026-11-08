@@ -71,6 +71,9 @@ var AIChatSidebar = class {
       openNote: guard(index => this.itemID && this.addon.openNote(this.itemID, index)),
       capture: guard(() => this.itemID && this.addon.startCapture(this.itemID)),
       rerun: guard(text => this.itemID && this.addon.rerun(this.itemID, text)),
+      searchPapers: query => this.itemID ? this.addon.searchPapers(this.itemID, query) : Promise.resolve([]),
+      addPaper: guard(paper => this.itemID && this.addon.addPaper(this.itemID, paper)),
+      removePaper: guard(index => this.itemID && this.addon.removePaper(this.itemID, index)),
       openSettings: guard(() => this.addon.openSettings()),
       clearImage: guard(index => this.itemID && this.addon.clearImage(this.itemID, index)),
       close: guard(() => this.addon.toggle(this.win)),
@@ -98,7 +101,7 @@ var AIChatSidebar = class {
     this.frameScheduled = true;
     this.win.requestAnimationFrame(() => {
       this.frameScheduled = false;
-      try { this.chat.render(this.addon.conversation(this.itemID)); }
+      try { this.chat.render(this.addon.conversation(this.itemID), this.addon.paperTexts); }
       catch (error) { Zotero.logError(error); }
     });
   }

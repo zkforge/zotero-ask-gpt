@@ -11,6 +11,8 @@ function element(tag, className, text) {
 // This page runs with chrome privileges, so model output must never become live markup:
 // raw HTML is escaped, only http(s) links survive (opened in the system browser), and
 // images are reduced to their alt text.
+// paper:<libraryID>/<attachmentKey>/<page> — a citation of another paper in the conversation.
+const PAPER_LINK = /^paper:(\d{1,9})\/([A-Z0-9]{8})\/(\d{1,4})$/;
 const escapeHTML = text => text.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const markdown = new marked.Marked({ gfm: true, breaks: true });
 markdown.use({
@@ -19,9 +21,12 @@ markdown.use({
     image: ({ text, href }) => escapeHTML(text || href || ''),
     link({ href, title, tokens }) {
       const label = this.parser.parseInline(tokens);
-      // Citations arrive as [(p. 3)](page:3 "verbatim phrase from that page").
+      // Citations arrive as [(p. 3)](page:3 "verbatim phrase from that page"), or for an added
+      // paper as [(Title, p. 3)](paper:<libraryID>/<attachmentKey>/3 "phrase").
       const page = /^page:(\d{1,4})$/i.exec(href || '')?.[1];
       if (page) return `<a href="#" class="page-ref" data-page="${page}" data-quote="${escapeHTML(title || '')}" title="跳到第 ${page} 页">${label}</a>`;
+      const cite = PAPER_LINK.exec(href || '');
+      if (cite) return `<a href="#" class="page-ref" data-paper="${cite[1]}/${cite[2]}" data-page="${cite[3]}" data-quote="${escapeHTML(title || '')}" title="打开这篇论文的第 ${cite[3]} 页">${label}</a>`;
       return /^https?:\/\//i.test(href) ? `<a href="${escapeHTML(href)}" data-external="">${label}</a>` : label;
     }
   }
@@ -56,6 +61,8 @@ noteMarkdown.use({
       const label = this.parser.parseInline(tokens);
       const page = /^page:(\d{1,4})$/i.exec(href || '')?.[1];
       if (page) return `<a href="page:${page}">${label}</a>`;
+      const cite = PAPER_LINK.exec(href || '');
+      if (cite) return `<a href="paper:${cite[1]}/${cite[2]}/${cite[3]}">${label}</a>`;
       return /^https?:\/\//i.test(href) ? `<a href="${escapeHTML(href)}">${label}</a>` : label;
     }
   }
@@ -120,6 +127,9 @@ function buildNote(conv, index, modelName, stamp) {
   const answer = conv.messages[index];
   const question = conv.messages.slice(0, index).reverse().find(m => m.role === 'user');
   const parts = [`<h1>${escapeHTML(question?.text || conv.title)}</h1>`];
+  for (const paper of question?.papers || []) {
+    parts.push(`<p>[附加论文：<a href="paper:${paper.libraryID}/${paper.attachmentKey}/1">${escapeHTML(paper.title)}</a>]</p>`);
+  }
   for (const image of question?.images || []) {
     parts.push(`<p>[截图${image.page ? `：<a href="page:${image.page}">p. ${image.page}</a>` : ''}]</p>`);
   }

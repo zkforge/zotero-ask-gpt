@@ -40,10 +40,14 @@
         </div>
         <div id="quote-body"></div>
       </div>
+      <div id="paper-card" class="paper-list" hidden></div>
       <div id="image-card" class="image-list" hidden></div>
       <div id="capture-error" class="capture-error" hidden></div>
       <textarea id="input" rows="2" placeholder="问问这篇论文…" title="Enter 发送，Shift+Enter 换行"></textarea>
       <div class="bar">
+        <button id="add-paper" class="icon tool" title="添加文库里的其他论文" aria-label="添加论文" aria-haspopup="menu" aria-expanded="false">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg>
+        </button>
         <button id="capture" class="icon tool" title="截图提问：在 PDF 上框选图表或公式" aria-label="截图提问">
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5.5v-2a1 1 0 0 1 1-1h2M10.5 2.5h2a1 1 0 0 1 1 1v2M13.5 10.5v2a1 1 0 0 1-1 1h-2M5.5 13.5h-2a1 1 0 0 1-1-1v-2"/><circle cx="8" cy="8" r="2"/></svg>
         </button>
@@ -55,6 +59,10 @@
         </button>
       </div>
       <div id="menu" class="menu-card" role="menu" hidden></div>
+      <div id="paper-menu" class="menu-card paper-menu" hidden>
+        <input id="paper-search" type="search" placeholder="搜索文库里的论文…" autocomplete="off" spellcheck="false">
+        <div id="paper-results" class="paper-results" role="listbox"></div>
+      </div>
     </div>
   </footer>
 

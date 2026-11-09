@@ -66,6 +66,7 @@ var AIChatSidebar = class {
       clearQuote: guard(() => this.itemID && this.addon.clearQuote(this.itemID)),
       models: () => this.addon.models(),
       prompts: () => this.addon.prompts(),
+      setPrompts: guard(list => this.addon.setPrompts(list)),
       setModel: guard((model, effort) => this.addon.setModel(model, effort)),
       openURL: guard(url => /^https?:\/\//i.test(url) && Zotero.launchURL(url)),
       locate: guard(target => this.itemID && this.addon.locate(this.itemID, target).catch(error => Zotero.logError(error))),

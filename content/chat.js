@@ -16,7 +16,8 @@ const ICONS = {
   retry: '<path d="M12.8 6.5A5 5 0 1 0 13 9.2"/><path d="M13 3v3.5H9.5"/>',
   edit: '<path d="M10.5 3.5l2 2-6.5 6.5H4v-2z"/><path d="M9 5l2 2"/>',
   doc: '<path d="M4.5 2.5h5l2.5 2.5v8.5h-7.5z"/><path d="M9.5 2.5V5H12"/>',
-  close: '<path d="M5 5l6 6M11 5l-6 6"/>'
+  close: '<path d="M5 5l6 6M11 5l-6 6"/>',
+  plus: '<path d="M8 3.5v9M3.5 8h9"/>'
 };
 const icon = (name, className = '') => `<svg class="${className}" viewBox="0 0 16 16" aria-hidden="true">${ICONS[name]}</svg>`;
 const EFFORTS = {
@@ -382,14 +383,41 @@ function openMenu(kind) {
   const button = menuButtons[kind];
   const list = element('div', 'menu-list');
   if (kind === 'prompts') {
-    list.append(...(window.host?.prompts() || []).map(text => {
+    // Each prompt can be removed (except the last one, since an empty list means the
+    // built-in prompts), and new ones are typed into the row under the list and go first.
+    const prompts = window.host?.prompts() || [];
+    const save = next => { window.host?.setPrompts(next); openMenu('prompts'); };
+    list.append(...prompts.map((text, i) => {
       const item = menuItem({ name: text, onClick: () => { closeMenu(); if (!busy) submit(text); } });
       item.setAttribute('role', 'menuitem');
       item.removeAttribute('aria-checked');
-      item.title = text;
-      return item;
+      const row = element('div', 'prompt-entry');
+      row.append(item);
+      if (prompts.length > 1) {
+        const remove = element('button', 'icon small delete');
+        remove.innerHTML = icon('close');
+        remove.title = '移除';
+        remove.setAttribute('aria-label', '移除这条快捷提问');
+        remove.addEventListener('click', event => { event.stopPropagation(); save(prompts.filter((_, j) => j !== i)); });
+        row.append(remove);
+      }
+      return row;
     }));
-    menu.replaceChildren(element('div', 'menu-label', '快捷提问'), list);
+    const add = element('label', 'prompt-add');
+    add.innerHTML = icon('plus');
+    const field = element('input');
+    field.placeholder = '添加快捷提问，回车保存';
+    add.append(field);
+    add.addEventListener('click', event => event.stopPropagation());
+    field.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' || event.isComposing) return;
+      event.preventDefault();
+      const text = field.value.replace(/\s+/g, ' ').trim();
+      if (!text) return;
+      save([text, ...prompts.filter(p => p !== text)]);
+      menu.querySelector('.prompt-add input')?.focus();
+    });
+    menu.replaceChildren(element('div', 'menu-label', '快捷提问'), list, add);
   } else if (kind === 'model') {
     list.append(...picker.models.map((model, i) => menuItem({
       name: model.name, key: i < 9 ? String(i + 1) : '', checked: model.id === picker.model,
@@ -405,6 +433,7 @@ function openMenu(kind) {
     menu.replaceChildren(element('div', 'menu-intro', '思考强度越高，回答越深入，但耗时更长，也会更快消耗额度。'), list);
   }
   picker.open = kind;
+  menu.classList.toggle('prompts', kind === 'prompts');
   menu.hidden = false;
   for (const [name, other] of Object.entries(menuButtons)) other.setAttribute('aria-expanded', String(name === kind));
   // Align the card with its button (left edge for the prompts button on the left, right

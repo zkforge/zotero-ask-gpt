@@ -89,6 +89,13 @@ var AIChatAddon = class {
     return lines.length ? lines : AIChatAddon.DEFAULT_PROMPTS;
   }
 
+  // Edited from the chat's quick prompt menu; the built-in list is stored as the empty setting.
+  setPrompts(list) {
+    const value = list.join('\n');
+    Zotero.Prefs.set('extensions.zoteroaichat.prompts', value === AIChatAddon.DEFAULT_PROMPTS.join('\n') ? '' : value, true);
+    for (const sidebar of this.sidebars.values()) sidebar.render();
+  }
+
   // Drop every idle conversation's codex thread, so the next message starts a new one under
   // the current settings (stored history is replayed into it).
   resetThreads() {

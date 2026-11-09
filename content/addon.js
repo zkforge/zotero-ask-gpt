@@ -12,6 +12,8 @@ var AIChatAddon = class {
     // { error } when it failed.
     this.account = undefined;
     this.login = null;
+    // Open settings panes showing the account, called with the sidebars on every change.
+    this.accountWatchers = new Set();
     this.codex.onAccount = ({ method, params }) => {
       if (method === 'account/login/completed') {
         // Starting a login again cancels the previous one, which then reports a failure.
@@ -111,12 +113,20 @@ var AIChatAddon = class {
 
   renderAll() {
     for (const sidebar of this.sidebars.values()) sidebar.render();
+    for (const watch of this.accountWatchers) watch();
   }
 
   async refreshAccount() {
     try { this.account = await this.codex.account(); }
     catch (error) { Zotero.logError(error); }
     this.renderAll();
+  }
+
+  // Logging out removes the login from ~/.codex, so the codex CLI is logged out too.
+  async logout() {
+    await this.codex.request('account/logout', {});
+    this.login = null;
+    await this.refreshAccount();
   }
 
   async startLogin() {

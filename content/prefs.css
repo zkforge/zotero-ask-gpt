@@ -14,6 +14,8 @@
 .zoteroaichat-prefs .hint { margin: 4px 0; color: var(--fill-secondary); font-size: 12px; line-height: 1.5; }
 .zoteroaichat-prefs .path { font-family: ui-monospace, "SF Mono", Menlo, monospace; user-select: text; }
 .zoteroaichat-prefs .usage { margin: 6px 0; }
+.zoteroaichat-prefs .account { flex: 1; min-width: 0; }
+.zoteroaichat-prefs .account.error { color: #d93025; }
 .zoteroaichat-prefs .status { color: var(--fill-secondary); font-size: 12px; }
 .zoteroaichat-prefs .status.ok { color: #2e9e4f; }
 .zoteroaichat-prefs .status.error { color: #d93025; }

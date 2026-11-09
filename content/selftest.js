@@ -145,6 +145,8 @@ async function runSelfTest(addon) {
       const $ = id => root.querySelector('#zoteroaichat-' + id);
       const checks = [...root.querySelectorAll('checkbox')].map(c => `${c.getAttribute('preference').split('.').pop()}=${c.checked}`);
       Zotero.debug(`[zoteroaichat] self-test prefs: ready=${root?.dataset.ready}, codex placeholder="${$('codex-path').placeholder}" value="${$('codex-path').value}", proxy placeholder="${$('proxy').placeholder}" value="${$('proxy').value}", language=${$('language').value}, ${checks.join(' ')}, prompt ${$('prompt').value.length} chars, data="${$('data-usage').textContent}" at ${$('data-path').textContent}`);
+      for (let i = 0; i < 40 && $('account').textContent === '正在读取…'; i++) await Zotero.Promise.delay(250);
+      Zotero.debug(`[zoteroaichat] self-test prefs account: "${$('account').textContent}", action ${$('account-action').hidden ? 'hidden' : `"${$('account-action').label}"`}`);
       $('test').doCommand();
       for (let i = 0; i < 60 && /正在|^$/.test($('test-status').textContent); i++) await Zotero.Promise.delay(250);
       Zotero.debug(`[zoteroaichat] self-test prefs test: ${$('test-status').className} "${$('test-status').textContent}"`);

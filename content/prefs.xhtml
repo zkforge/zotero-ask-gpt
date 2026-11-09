@@ -2,6 +2,11 @@
   <groupbox>
     <label><html:h2>连接</html:h2></label>
     <hbox class="field" align="center">
+      <label class="name" value="ChatGPT 账号"/>
+      <html:span id="zoteroaichat-account" class="account">正在读取…</html:span>
+      <button id="zoteroaichat-account-action" hidden="true"/>
+    </hbox>
+    <hbox class="field" align="center">
       <label class="name" value="Codex 路径"/>
       <html:input id="zoteroaichat-codex-path" type="text" preference="extensions.zoteroaichat.codexPath" spellcheck="false"/>
     </hbox>

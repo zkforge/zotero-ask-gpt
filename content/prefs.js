@@ -13,6 +13,30 @@ document.addEventListener('load', event => {
   addon.codex.findCommand().then(path => { $('codex-path').placeholder = path ? `自动检测：${path}` : '未找到 codex，请填写完整路径'; });
   addon.codex.systemProxy().then(proxy => { $('proxy').placeholder = proxy ? `跟随系统：${proxy}` : '跟随系统：直连'; });
 
+  // ChatGPT account, kept current while the pane is open (logins finish in the browser).
+  const showAccount = () => {
+    const { account, login } = addon;
+    const action = $('account-action');
+    $('account').className = 'account' + (login?.error && !account ? ' error' : '');
+    $('account').textContent = account === undefined ? '正在读取…'
+      : account ? (account.type === 'chatgpt' ? [account.email || '已登录', account.planType !== 'unknown' && account.planType].filter(Boolean).join(' · ') : '已登录')
+      : login?.pending ? '正在浏览器中登录…' : login?.error ? `未登录（登录失败：${login.error}）` : '未登录';
+    action.hidden = account === undefined || (!!account && account.type !== 'chatgpt');
+    action.label = account ? '退出登录…' : login?.pending ? '重新打开' : '登录';
+  };
+  addon.accountWatchers.add(showAccount);
+  window.addEventListener('unload', () => addon.accountWatchers.delete(showAccount));
+  showAccount();
+  addon.refreshAccount();
+  $('account-action').addEventListener('command', async () => {
+    if (!addon.account) { addon.startLogin(); return; }
+    const ok = Services.prompt.confirm(window, '退出 ChatGPT 登录',
+      `将退出 ${addon.account.email || '当前账号'}。登录信息和终端里的 codex 共用，退出后 codex 也需要重新登录。确定继续吗？`);
+    if (!ok) return;
+    try { await addon.logout(); }
+    catch (error) { Services.prompt.alert(window, '退出登录失败', error.message); }
+  });
+
   $('test').addEventListener('command', async () => {
     const status = $('test-status');
     status.className = 'status';
@@ -20,10 +44,7 @@ document.addEventListener('load', event => {
     try {
       const { version, models, account } = await addon.testConnection();
       status.className = account ? 'status ok' : 'status error';
-      const who = !account ? '未登录 ChatGPT，请在侧栏点「登录」'
-        : account.type === 'chatgpt' ? `已登录 ${account.email || 'ChatGPT'}${account.planType && account.planType !== 'unknown' ? `（${account.planType}）` : ''}`
-        : '已登录';
-      status.textContent = `已连接 · codex ${version} · ${models} 个模型可用 · ${who}`;
+      status.textContent = `已连接 · codex ${version} · ${models} 个模型可用` + (account ? '' : ' · 未登录 ChatGPT');
     } catch (error) {
       status.className = 'status error';
       status.textContent = error.message;

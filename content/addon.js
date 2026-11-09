@@ -197,10 +197,11 @@ var AIChatAddon = class {
     if (toolbar) {
       const button = doc.createXULElement('toolbarbutton');
       button.id = 'zoteroaichat-toggle';
-      button.setAttribute('label', 'Ask GPT');
+      // An icon button styled like Zotero's own toolbar buttons, tinted with the same secondary fill.
+      button.className = 'zotero-tb-button';
+      button.setAttribute('aria-label', 'Ask GPT');
       button.setAttribute('tooltiptext', '展开或收起 Ask GPT 侧栏 (⌘⇧G)');
-      // Zotero sizes every button in this toolbar to 28px wide (icon buttons); let the label fit.
-      button.style.cssText = 'width:auto;min-width:0;height:28px;margin:0 6px;padding:0 10px;border-radius:6px;font-size:12px;font-weight:500;';
+      button.style.cssText = `list-style-image:url("${this.rootURI}content/icon.svg");-moz-context-properties:fill,fill-opacity;fill:var(--fill-secondary);`;
       button.addEventListener('command', () => this.toggle(win));
       toolbar.prepend(button);
     }

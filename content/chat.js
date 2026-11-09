@@ -300,7 +300,11 @@ window.render = (conv, paperTexts = new Map()) => {
   const stick = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 40;
   if (!conv.messages.length) {
     const empty = element('div', 'empty');
-    const title = element('h2', 'greeting', greeting());
+    const title = element('h2', 'greeting');
+    const logo = element('img', 'logo');
+    logo.src = 'logo.svg';
+    logo.alt = '';
+    title.append(logo, greeting());
     const list = element('div', 'suggestions');
     for (const text of (window.host?.prompts() || []).slice(0, 3)) {
       const chip = element('button', 'suggestion', text);

@@ -2,6 +2,7 @@
   "manifest_version": 2,
   "name": "Zotero Ask GPT",
   "version": "0.1.0",
+  "icons": { "48": "content/logo.svg", "96": "content/logo.svg" },
   "description": "Zotero 的 PDF 问答插件，通过本机 Codex CLI 使用 ChatGPT 账号提问。",
   "applications": {
     "zotero": {

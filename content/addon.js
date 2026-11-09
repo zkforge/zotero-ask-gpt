@@ -32,9 +32,10 @@ var AIChatAddon = class {
     ];
 
     this.tabObserver = Zotero.Notifier.registerObserver({
-      notify: event => {
+      notify: (event, _type, ids) => {
         if (['select', 'load', 'close'].includes(event))
           for (const win of Zotero.getMainWindows()) this.updateWindow(win);
+        if (event === 'close') this.releaseClosed(new Set(ids.flat()));
       }
     }, ['tab'], 'zoteroaichat-tabs');
     for (const win of Zotero.getMainWindows()) this.addWindow(win);
@@ -132,6 +133,23 @@ var AIChatAddon = class {
       await IOUtils.remove(PathUtils.join(this.dataDir(), sub), { recursive: true, ignoreAbsent: true });
   }
 
+  // Drop the in-memory state (full text, thread) of papers whose reader tabs are all closed.
+  // Messages are already on disk; a conversation with a reply in progress or with a quote,
+  // screenshots or papers waiting to be sent is kept. Zotero.Reader drops the readers of
+  // `closedTabs` in its own observer of the same event, which may run after this one.
+  releaseClosed(closedTabs) {
+    const open = new Set(Zotero.Reader._readers.filter(reader => !closedTabs.has(reader.tabID)).map(reader => reader.itemID));
+    for (const [itemID, conv] of this.conversations) {
+      if (open.has(itemID) || conv.busy || conv.quote || conv.images?.length || conv.papers?.length) continue;
+      if (conv.threadId) this.codex.unlisten(conv.threadId);
+      this.conversations.delete(itemID);
+    }
+    const used = new Set([...this.conversations.values()]
+      .flatMap(conv => [...conv.messages, conv].flatMap(m => m.papers || []))
+      .map(paper => `${paper.libraryID}/${paper.attachmentKey}`));
+    for (const id of this.paperTexts.keys()) if (!used.has(id)) this.paperTexts.delete(id);
+  }
+
   currentReader(win) {
     if (!String(win.Zotero_Tabs.selectedType).startsWith('reader')) return null;
     return Zotero.Reader.getByTabID(win.Zotero_Tabs.selectedID) || null;
@@ -219,7 +237,7 @@ var AIChatAddon = class {
     if (!win) return;
     const conv = this.conversation(itemID);
     if ((conv.images || []).length >= AIChatAddon.MAX_IMAGES) {
-      conv.captureError = `一条消息最多附 ${AIChatAddon.MAX_IMAGES} 张截图`;
+      conv.inputError = `一条消息最多附 ${AIChatAddon.MAX_IMAGES} 张截图`;
       this.changed(conv);
       return;
     }
@@ -266,7 +284,7 @@ var AIChatAddon = class {
       this.attachCapture(itemID, reader, rect).catch(error => {
         Zotero.logError(error);
         const conv = this.conversation(itemID);
-        conv.captureError = error.message;
+        conv.inputError = error.message;
         this.changed(conv);
       });
     });
@@ -277,7 +295,7 @@ var AIChatAddon = class {
     if ((conv.images || []).length >= AIChatAddon.MAX_IMAGES) throw new Error(`一条消息最多附 ${AIChatAddon.MAX_IMAGES} 张截图`);
     const image = await this.cropRegion(reader, rect);
     conv.images = [...(conv.images || []), image];
-    conv.captureError = null;
+    conv.inputError = null;
     this.toggle(Zotero.getMainWindow(), true);
     this.changed(conv);
   }
@@ -316,13 +334,16 @@ var AIChatAddon = class {
     return { path, url: PathUtils.toFileURI(path), page: Number(pageEl.dataset.pageNumber) || null, width: out.width, height: out.height };
   }
 
-  // Remove one attached screenshot, or all of them when no index is given.
+  // Remove one attached screenshot, or all of them when no index is given, with its file.
   clearImage(itemID, index) {
     const conv = this.conversations.get(itemID);
     if (!conv) return;
-    conv.images = Number.isInteger(index) ? (conv.images || []).filter((_, i) => i !== index) : [];
-    conv.captureError = null;
+    const images = conv.images || [];
+    const removed = Number.isInteger(index) ? images.filter((_, i) => i === index) : images;
+    conv.images = images.filter(image => !removed.includes(image));
+    conv.inputError = null;
     this.changed(conv);
+    for (const image of removed) IOUtils.remove(image.path, { ignoreAbsent: true }).catch(error => Zotero.logError(error));
   }
 
   quote(reader, annotation) {
@@ -481,13 +502,21 @@ var AIChatAddon = class {
 
   // The text codex sees for a user message, with the quoted passage inlined.
   // An attached image is sent as a local image with the turn; in replayed history only a
-  // note that it was there survives.
-  promptFor(message, { replay = false } = {}) {
+  // note that it was there survives. An added paper's full text goes in only with the first
+  // message that carries it (`earlier` are the messages before this one), since the thread
+  // or the replayed history already holds it after that.
+  promptFor(message, { replay = false, earlier = [] } = {}) {
     const { quote, images = [], papers = [], text } = message;
     const parts = [];
+    const sent = new Set(earlier.flatMap(m => (m.papers || []).map(p => `${p.libraryID}/${p.attachmentKey}`)));
     for (const paper of papers) {
-      const cached = this.paperTexts.get(`${paper.libraryID}/${paper.attachmentKey}`);
-      const cite = `[(${paper.title.split(/[:：]/)[0].slice(0, 40)}, p. N)](paper:${paper.libraryID}/${paper.attachmentKey}/N "phrase copied from that page")`;
+      const id = `${paper.libraryID}/${paper.attachmentKey}`;
+      const cached = this.paperTexts.get(id);
+      const cite = `[(${paper.title.split(/[:：]/)[0].slice(0, 40)}, p. N)](paper:${id}/N "phrase copied from that page")`;
+      if (sent.has(id)) {
+        parts.push(`The user added the paper "${paper.title}" to this message again; its full text was given earlier in the conversation. Cite it as ${cite}.`);
+        continue;
+      }
       parts.push([
         'The user added another paper from their library to this conversation.',
         cached?.header || `Title: ${paper.title}`,
@@ -565,18 +594,19 @@ var AIChatAddon = class {
   async searchPapers(itemID, query) {
     const current = Zotero.Items.get(itemID);
     const currentParent = current?.parentItem || current;
-    const toEntry = async item => {
+    // Child items are cached in memory, so finding the PDF needs no database query per item.
+    const toEntry = item => {
       if (!item?.isRegularItem() || item.id === currentParent?.id || item.deleted) return null;
-      const pdf = await item.getBestAttachment();
-      if (!pdf?.isPDFAttachment()) return null;
+      const pdf = Zotero.Items.get(item.getAttachments()).find(a => a.isPDFAttachment());
+      if (!pdf) return null;
       const year = Zotero.Date.strToDate(item.getField('date') || '').year;
       return { libraryID: item.libraryID, key: item.key, attachmentKey: pdf.key, title: item.getDisplayTitle(), meta: [item.firstCreator, year].filter(Boolean).join(' · ') };
     };
-    const collect = async (items, limit) => {
+    const collect = (items, limit) => {
       const papers = [];
       for (const item of items) {
         if (papers.length >= limit) break;
-        const entry = await toEntry(item);
+        const entry = toEntry(item);
         if (entry) papers.push(entry);
       }
       return papers;
@@ -585,7 +615,7 @@ var AIChatAddon = class {
     const q = query.trim();
     if (!q && currentParent?.isRegularItem()) {
       const related = currentParent.relatedItems.map(key => Zotero.Items.getByLibraryAndKey(currentParent.libraryID, key));
-      const papers = await collect(related, 20);
+      const papers = collect(related, 20);
       if (papers.length) groups.push({ label: '相关条目', papers });
     }
     for (const library of Zotero.Libraries.getAll().filter(l => ['user', 'group'].includes(l.libraryType))) {
@@ -595,7 +625,7 @@ var AIChatAddon = class {
       for (const type of ['attachment', 'note', 'annotation']) search.addCondition('itemType', 'isNot', type);
       const items = (await Zotero.Items.getAsync(await search.search()))
         .sort((a, b) => (a.dateAdded < b.dateAdded ? 1 : -1));
-      const papers = await collect(items, q ? 50 : 30);
+      const papers = collect(items, q ? 50 : 30);
       if (papers.length) groups.push({ label: library.libraryType === 'user' ? '我的文库' : library.name, papers });
     }
     return groups;
@@ -624,6 +654,7 @@ var AIChatAddon = class {
     const conv = this.conversations.get(itemID);
     if (!conv) return;
     conv.papers = (conv.papers || []).filter((_, i) => i !== index);
+    conv.inputError = null;
     this.changed(conv);
   }
 
@@ -637,6 +668,7 @@ var AIChatAddon = class {
     const { quote } = conv;
     const images = conv.images || [];
     const papers = conv.papers || [];
+    const typed = text;
     text = text.trim() || (images.length > 1 ? '比较并解释这几张图（或表格、公式）。'
       : images.length ? '解释这张图（或表格、公式）的含义。' : quote ? '解释这段文字。'
       : papers.length ? '附加的论文和当前这篇有什么关系？各自的方法和结论有什么异同？' : '');
@@ -645,7 +677,8 @@ var AIChatAddon = class {
     conv.quote = null;
     conv.images = [];
     conv.papers = [];
-    await this.ask(conv, { role: 'user', text, quote, images, papers });
+    conv.inputError = null;
+    await this.ask(conv, { role: 'user', text, quote, images, papers }, { draft: typed });
   }
 
   // Ask the last question again, or an edited version of it, on a fresh thread whose replayed
@@ -657,14 +690,19 @@ var AIChatAddon = class {
     if (index < 0) return;
     const question = conv.messages[index];
     conv.messages = conv.messages.slice(0, index);
+    if (conv.threadId) this.codex.unlisten(conv.threadId);
     conv.threadId = null;
     await this.ask(conv, editedText?.trim() ? { ...question, text: editedText.trim() } : question);
   }
 
   // Run one question: append it with a pending reply, start a thread if there is none
   // (replaying the earlier messages into it), then start the turn.
-  async ask(conv, message) {
+  // A question that would not fit the model's context window is not sent. From the input
+  // box (`draft` is what the user typed) it goes back into the input with its attachments;
+  // a rerun ends with an error reply.
+  async ask(conv, message, { draft = null } = {}) {
     const earlier = conv.threadId ? [] : [...conv.messages];
+    const before = [...conv.messages];
     const images = message.images || [];
     conv.messages.push(message);
     conv.messages.push({ role: 'assistant', text: '', pending: true });
@@ -674,14 +712,38 @@ var AIChatAddon = class {
       // Added papers' full text goes into the prompt, including in replayed history.
       await this.loadPapers([...earlier, message].flatMap(m => m.papers || []));
       this.changed(conv);
-      const history = earlier.map(m => ({ role: m.role, text: m.role === 'user' ? this.promptFor(m, { replay: true }) : m.text }));
+      const history = earlier.map((m, i) => ({ role: m.role, text: m.role === 'user' ? this.promptFor(m, { replay: true, earlier: earlier.slice(0, i) }) : m.text }));
+      const prompt = this.promptFor(message, { earlier: before });
       await conv.contextReady;
+      const language = { zh: 'Always reply in Simplified Chinese.', en: 'Always reply in English.' }[Zotero.Prefs.get('extensions.zoteroaichat.language', true)];
+      const instructions = [conv.instructions, language].filter(Boolean).join('\n\n');
+
+      const estimate = AIChatAddon.estimateTokens;
+      const contextWindow = conv.usage?.window || this.codex.contextWindow;
+      const needed = conv.threadId ? (conv.usage?.used || 0) + estimate(prompt)
+        : [instructions, ...history.map(m => m.text), prompt].reduce((sum, text) => sum + estimate(text), 0);
+      if (contextWindow && needed > contextWindow * AIChatAddon.CONTEXT_LIMIT) {
+        const size = `约 ${Math.round(needed / 1000)}k tokens，模型上下文只有 ${Math.round(contextWindow / 1000)}k`;
+        Zotero.debug(`[zoteroaichat] not sending: ${needed} tokens needed, window ${contextWindow}`);
+        if (draft === null) {
+          this.finishTurn(conv, `内容太长（${size}）。请开新对话后再问。`);
+          return;
+        }
+        conv.messages = before;
+        conv.busy = false;
+        Object.assign(conv, {
+          quote: message.quote, images, papers: message.papers || [], draft: { text: draft },
+          inputError: `内容太长，没有发送（${size}）。请去掉一些附加的论文，或开新对话。`
+        });
+        this.changed(conv);
+        return;
+      }
+
       if (!conv.threadId) {
-        const language = { zh: 'Always reply in Simplified Chinese.', en: 'Always reply in English.' }[Zotero.Prefs.get('extensions.zoteroaichat.language', true)];
-        conv.threadId = await this.codex.startThread([conv.instructions, language].filter(Boolean).join('\n\n'), history);
+        conv.threadId = await this.codex.startThread(instructions, history);
         this.codex.listen(conv.threadId, event => this.onEvent(conv, event));
       }
-      conv.turnId = await this.codex.startTurn(conv.threadId, this.promptFor(message), images.map(image => image.path));
+      conv.turnId = await this.codex.startTurn(conv.threadId, prompt, images.map(image => image.path));
     } catch (error) {
       Zotero.logError(error);
       this.finishTurn(conv, error.message);
@@ -699,7 +761,8 @@ var AIChatAddon = class {
     const conv = this.conversations.get(itemID);
     if (!conv) return;
     this.stop(itemID);
-    const fresh = { ...conv, threadId: null, turnId: null, busy: false, messages: [], quote: null, images: [], papers: [] };
+    if (conv.threadId) this.codex.unlisten(conv.threadId);
+    const fresh = { ...conv, threadId: null, turnId: null, busy: false, messages: [], quote: null, images: [], papers: [], usage: null, inputError: null };
     this.conversations.set(itemID, fresh);
     this.changed(fresh);
     this.save(fresh);
@@ -741,9 +804,13 @@ var AIChatAddon = class {
   onEvent(conv, { method, params }) {
     if (this.conversations.get(conv.itemID) !== conv) return;
     const reply = conv.messages[conv.messages.length - 1];
+    const errorText = error => error?.codexErrorInfo === 'contextWindowExceeded'
+      ? '内容超出了模型的上下文。请开新对话，或少附加几篇论文。' : error?.message || '请求失败';
     if (method === 'thread/tokenUsage/updated') {
       // `last` is the latest request: everything the model saw plus its reply.
       conv.usage = { used: params.tokenUsage.last.totalTokens, window: params.tokenUsage.modelContextWindow };
+      // Remembered for the size check on conversations that have not reported usage yet.
+      if (conv.usage.window) this.codex.contextWindow = conv.usage.window;
       this.changed(conv);
     } else if (method === 'item/agentMessage/delta' && reply?.pending) {
       if (reply.itemId && reply.itemId !== params.itemId && reply.text) reply.text += '\n\n';
@@ -751,10 +818,10 @@ var AIChatAddon = class {
       reply.text += params.delta;
       this.changed(conv);
     } else if (method === 'error' && !params.willRetry) {
-      if (reply?.pending) reply.error = params.error?.message || '请求失败';
+      if (reply?.pending) reply.error = errorText(params.error);
     } else if (method === 'turn/completed') {
       const turn = params.turn;
-      const error = turn.status === 'failed' ? (turn.error?.message || reply?.error || '请求失败')
+      const error = turn.status === 'failed' ? (turn.error ? errorText(turn.error) : reply?.error || '请求失败')
         : turn.status === 'interrupted' ? '已停止' : reply?.error;
       this.finishTurn(conv, error);
     } else if (method === 'process/exited') {
@@ -775,6 +842,9 @@ AIChatAddon.estimateTokens = text => {
   const cjk = (text.match(/[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]/g) || []).length;
   return Math.round(cjk + (text.length - cjk) / 4);
 };
+
+// Share of the context window a question may fill; the token estimate is rough.
+AIChatAddon.CONTEXT_LIMIT = 0.9;
 
 // Roughly 120k tokens of paper text; keeps room for the conversation itself.
 AIChatAddon.MAX_CONTEXT_CHARS = 480000;

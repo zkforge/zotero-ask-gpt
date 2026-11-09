@@ -220,6 +220,7 @@ function greeting() {
 let lastConv = null;
 let lastPaperTexts = null;
 const renderedMessages = new WeakMap();
+const restoredDrafts = new WeakSet();
 
 window.render = (conv, paperTexts = new Map()) => {
   if (lastConv && lastConv.itemID !== conv.itemID) closePaperMenu();
@@ -253,8 +254,13 @@ window.render = (conv, paperTexts = new Map()) => {
     thumb.append(remove);
     return thumb;
   }));
-  $('capture-error').hidden = !conv.captureError;
-  $('capture-error').textContent = conv.captureError || '';
+  $('input-error').hidden = !conv.inputError;
+  $('input-error').textContent = conv.inputError || '';
+  // A question that was not sent comes back once, unless the user has typed something since.
+  if (conv.draft && !restoredDrafts.has(conv.draft)) {
+    restoredDrafts.add(conv.draft);
+    if (!input.value.trim()) input.value = conv.draft.text;
+  }
 
   const papers = conv.papers || [];
   $('paper-card').hidden = !papers.length;

@@ -146,6 +146,10 @@ var CodexService = class {
     this.threadListeners.set(threadId, listener);
   }
 
+  unlisten(threadId) {
+    this.threadListeners.delete(threadId);
+  }
+
   stop() {
     this.threadListeners.clear();
     this.proc?.kill();

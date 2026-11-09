@@ -90,7 +90,10 @@ var AIChatSidebar = class {
     this.panel.hidden = !visible;
     this.splitter.hidden = !visible;
     this.host.classList.toggle('zoteroaichat-visible', visible);
-    if (reader && reader.itemID !== this.itemID) {
+    // With no reader shown, let go of the paper so a queued render does not bring back a
+    // conversation the addon released when its tab closed.
+    if (!reader) this.itemID = null;
+    else if (reader.itemID !== this.itemID) {
       this.itemID = reader.itemID;
       this.render();
     }
@@ -101,6 +104,7 @@ var AIChatSidebar = class {
     this.frameScheduled = true;
     this.win.requestAnimationFrame(() => {
       this.frameScheduled = false;
+      if (!this.itemID) return;
       try { this.chat.render(this.addon.conversation(this.itemID), this.addon.paperTexts); }
       catch (error) { Zotero.logError(error); }
     });

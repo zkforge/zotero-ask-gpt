@@ -1,7 +1,7 @@
 // Development self-test, loaded by bootstrap.js only when the pref
 // extensions.zoteroaichat.devSelfTest is set. Results go to the Zotero debug log
 // ([zoteroaichat] self-test …). Modes: true (full: citations through the model),
-// "nav", "note", "image", "prefs" — see docs/design.md.
+// "nav", "limits", "note", "image", "prefs" — see docs/design.md.
 async function runSelfTest(addon) {
   try {
     let reader = null;
@@ -31,6 +31,38 @@ async function runSelfTest(addon) {
     await Zotero.Promise.delay(1000);
     Zotero.debug(`[zoteroaichat] self-test navigate: asked p.5, reader at pageIndex ${reader._internalReader?._state?.primaryViewStats?.pageIndex}`);
     const mode = Zotero.Prefs.get('extensions.zoteroaichat.devSelfTest', true);
+    if (mode === 'limits') {
+      // No model calls. A question over the context limit comes back to the input, a paper
+      // already in the conversation is not repeated, and closing the tab frees the paper.
+      const itemID = reader.itemID;
+      const saved = addon.codex.contextWindow;
+      const before = conv.messages.length;
+      addon.codex.contextWindow = 1000;
+      conv.quote = { text: 'self-test quote', page: 1, position: null };
+      await addon.send(itemID, 'self-test question');
+      addon.codex.contextWindow = saved;
+      Zotero.debug(`[zoteroaichat] self-test limits: messages ${before}->${conv.messages.length}, busy=${conv.busy}, draft=${JSON.stringify(conv.draft)}, quote=${!!conv.quote}, error=${conv.inputError}`);
+      addon.clearQuote(itemID);
+      conv.inputError = null;
+      const paper = { libraryID: 1, attachmentKey: 'SELFTEST', title: 'Self-test paper' };
+      const again = addon.promptFor({ text: 'q', papers: [paper] }, { earlier: [{ role: 'user', text: 'q', papers: [paper] }] });
+      const first = addon.promptFor({ text: 'q', papers: [paper] });
+      Zotero.debug(`[zoteroaichat] self-test dedupe: first has full-text block=${first.includes('added another paper')}, repeat refers back=${again.includes('given earlier')} and omits it=${!again.includes('added another paper')}`);
+      for (const query of ['', 'a']) {
+        const started = Date.now();
+        const groups = await addon.searchPapers(itemID, query);
+        Zotero.debug(`[zoteroaichat] self-test picker "${query}": ${Date.now() - started} ms, ${groups.map(g => `${g.label} ${g.papers.length}`).join(', ')}`);
+      }
+      Zotero.getMainWindow().Zotero_Tabs.close(reader.tabID);
+      await Zotero.Promise.delay(500);
+      Zotero.debug(`[zoteroaichat] self-test release: conversation kept after tab close=${addon.conversations.has(itemID)}`);
+      const reopened = await Zotero.Reader.open(itemID);
+      await reopened?._initPromise;
+      const restored = addon.conversation(itemID);
+      await Promise.all([restored.contextReady, restored.restored]);
+      Zotero.debug(`[zoteroaichat] self-test reopen: ${restored.notice}; restored ${restored.messages.length} messages`);
+      return;
+    }
     if (mode === 'rerun') {
       // Ask, regenerate, then edit the question; each rerun must replace the last pair.
       // The test exchange is removed afterwards.
@@ -93,10 +125,10 @@ async function runSelfTest(addon) {
         overlay.dispatchEvent(mouse('mousedown', from));
         overlay.dispatchEvent(mouse('mousemove', to));
         overlay.dispatchEvent(mouse('mouseup', to));
-        for (let i = 0; i < 20 && (conv.images?.length || 0) === count && !conv.captureError; i++) await Zotero.Promise.delay(200);
+        for (let i = 0; i < 20 && (conv.images?.length || 0) === count && !conv.inputError; i++) await Zotero.Promise.delay(200);
       }
       const images = conv.images || [];
-      Zotero.debug(`[zoteroaichat] self-test image: overlay removed=${!win.document.getElementById('zoteroaichat-capture')}, images=${images.length} ${JSON.stringify(images.map(i => [i.page, i.width, i.height]))}, error=${conv.captureError}`);
+      Zotero.debug(`[zoteroaichat] self-test image: overlay removed=${!win.document.getElementById('zoteroaichat-capture')}, images=${images.length} ${JSON.stringify(images.map(i => [i.page, i.width, i.height]))}, error=${conv.inputError}`);
       if (images.length) {
         const threadId = await addon.codex.startThread('');
         let reply = '';
@@ -106,7 +138,6 @@ async function runSelfTest(addon) {
         }));
         await addon.codex.startTurn(threadId, 'How many images did you receive? Describe each in one short sentence.', images.map(i => i.path));
         Zotero.debug(`[zoteroaichat] self-test image reply (${await done}): ${reply}`);
-        for (const image of images) await IOUtils.remove(image.path, { ignoreAbsent: true });
         addon.clearImage(reader.itemID);
       }
       return;

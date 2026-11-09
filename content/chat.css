@@ -367,8 +367,8 @@ textarea:focus, textarea:focus-visible { outline: none; box-shadow: none; }
 }
 .thumb:hover .remove, .thumb .remove:focus-visible { opacity: 1; }
 .thumb .remove svg { width: 11px; height: 11px; stroke-width: 2; }
-.capture-error { margin: 8px 12px 0; color: var(--danger); font-size: 12px; }
-.capture-error[hidden] { display: none; }
+.input-error { margin: 8px 12px 0; color: var(--danger); font-size: 12px; }
+.input-error[hidden] { display: none; }
 .msg-images { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-bottom: 6px; }
 .msg-images.single { grid-template-columns: minmax(0, 1fr); }
 .msg-image {

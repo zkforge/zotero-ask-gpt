@@ -7,6 +7,19 @@ var AIChatAddon = class {
     this.sidebars = new Map();
     this.conversations = new Map();
     this.paperTexts = new Map();
+    // ChatGPT login, shown in every sidebar: `account` is undefined until codex answers and
+    // null when a login is needed; `login` is { pending } while the browser login runs, or
+    // { error } when it failed.
+    this.account = undefined;
+    this.login = null;
+    this.codex.onAccount = ({ method, params }) => {
+      if (method === 'account/login/completed') {
+        // Starting a login again cancels the previous one, which then reports a failure.
+        if (this.login?.pending && params.loginId !== this.login.id) return;
+        this.login = params.success ? null : { error: params.error || '登录没有完成' };
+      }
+      this.refreshAccount();
+    };
   }
 
   startup() {
@@ -93,7 +106,30 @@ var AIChatAddon = class {
   setPrompts(list) {
     const value = list.join('\n');
     Zotero.Prefs.set('extensions.zoteroaichat.prompts', value === AIChatAddon.DEFAULT_PROMPTS.join('\n') ? '' : value, true);
+    this.renderAll();
+  }
+
+  renderAll() {
     for (const sidebar of this.sidebars.values()) sidebar.render();
+  }
+
+  async refreshAccount() {
+    try { this.account = await this.codex.account(); }
+    catch (error) { Zotero.logError(error); }
+    this.renderAll();
+  }
+
+  async startLogin() {
+    const login = this.login = { pending: true };
+    this.renderAll();
+    try {
+      const { loginId, authUrl } = await this.codex.login();
+      login.id = loginId;
+      Zotero.launchURL(authUrl);
+    } catch (error) {
+      this.login = { error: error.message };
+      this.renderAll();
+    }
   }
 
   // Drop every idle conversation's codex thread, so the next message starts a new one under
@@ -113,7 +149,10 @@ var AIChatAddon = class {
   async testConnection() {
     this.restartCodex();
     await this.codex.start();
-    return { version: this.codex.serverVersion, models: (await this.codex.listModels()).length };
+    const [models, account] = await Promise.all([this.codex.listModels(), this.codex.account()]);
+    this.account = account;
+    this.renderAll();
+    return { version: this.codex.serverVersion, models: models.length, account };
   }
 
   dataDir() {
@@ -248,6 +287,8 @@ var AIChatAddon = class {
     if (open === undefined) open = !(sidebar && sidebar.isVisible());
     Zotero.Prefs.set('extensions.zoteroaichat.open', open, true);
     if (open && !sidebar) this.sidebars.set(win, new AIChatSidebar(this, win));
+    // Catches a login made in the terminal while the sidebar was closed.
+    if (open) this.refreshAccount();
     this.sidebars.get(win)?.sync(reader);
     if (open) this.sidebars.get(win).focusInput();
   }
@@ -881,6 +922,7 @@ var AIChatAddon = class {
 
   // Model catalog plus the effective choice: the user's pick, else codex's configured default.
   async models() {
+    this.refreshAccount();
     const [models, config] = await Promise.all([
       this.codex.listModels(),
       this.codex.request('config/read', {}).then(r => r.config, () => ({}))
@@ -900,8 +942,13 @@ var AIChatAddon = class {
   onEvent(conv, { method, params }) {
     if (this.conversations.get(conv.itemID) !== conv) return;
     const reply = conv.messages[conv.messages.length - 1];
-    const errorText = error => error?.codexErrorInfo === 'contextWindowExceeded'
-      ? '内容超出了模型的上下文。请开新对话，或少附加几篇论文。' : error?.message || '请求失败';
+    const authFailed = error => {
+      const info = error?.codexErrorInfo;
+      return info === 'unauthorized' || Object.values(info || {})[0]?.httpStatusCode === 401;
+    };
+    const errorText = error => authFailed(error) ? '没有登录 ChatGPT，或登录已过期。请点下方的「登录」。'
+      : error?.codexErrorInfo === 'contextWindowExceeded' ? '内容超出了模型的上下文。请开新对话，或少附加几篇论文。'
+      : error?.message || '请求失败';
     if (method === 'thread/tokenUsage/updated') {
       // `last` is the latest request: everything the model saw plus its reply.
       conv.usage = { used: params.tokenUsage.last.totalTokens, window: params.tokenUsage.modelContextWindow };
@@ -913,12 +960,18 @@ var AIChatAddon = class {
       reply.itemId = params.itemId;
       reply.text += params.delta;
       this.changed(conv);
-    } else if (method === 'error' && !params.willRetry) {
+    } else if (method === 'error' && (!params.willRetry || authFailed(params.error))) {
       if (reply?.pending) reply.error = errorText(params.error);
+      // codex retries a 401 five times (about ten seconds); give up at the first one.
+      if (authFailed(params.error)) {
+        this.account = null;
+        this.renderAll();
+        if (params.willRetry) this.stop(conv.itemID);
+      }
     } else if (method === 'turn/completed') {
       const turn = params.turn;
       const error = turn.status === 'failed' ? (turn.error ? errorText(turn.error) : reply?.error || '请求失败')
-        : turn.status === 'interrupted' ? '已停止' : reply?.error;
+        : turn.status === 'interrupted' ? reply?.error || '已停止' : reply?.error;
       this.finishTurn(conv, error);
     } else if (method === 'process/exited') {
       conv.threadId = null;

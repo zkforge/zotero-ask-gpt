@@ -18,9 +18,12 @@ document.addEventListener('load', event => {
     status.className = 'status';
     status.textContent = '正在连接…';
     try {
-      const { version, models } = await addon.testConnection();
-      status.className = 'status ok';
-      status.textContent = `已连接 · codex ${version} · ${models} 个模型可用`;
+      const { version, models, account } = await addon.testConnection();
+      status.className = account ? 'status ok' : 'status error';
+      const who = !account ? '未登录 ChatGPT，请在侧栏点「登录」'
+        : account.type === 'chatgpt' ? `已登录 ${account.email || 'ChatGPT'}${account.planType && account.planType !== 'unknown' ? `（${account.planType}）` : ''}`
+        : '已登录';
+      status.textContent = `已连接 · codex ${version} · ${models} 个模型可用 · ${who}`;
     } catch (error) {
       status.className = 'status error';
       status.textContent = error.message;

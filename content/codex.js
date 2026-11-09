@@ -6,6 +6,7 @@ var CodexService = class {
     this.proc = null;
     this.peer = null;
     this.threadListeners = new Map();
+    this.onAccount = null;
   }
 
   start() {
@@ -46,7 +47,8 @@ var CodexService = class {
       environment: { ...env, ZOTEROAICHAT_STDERR: stderrLog }, environmentAppend: true, workdir
     });
     const peer = new JsonRpcPeer(line => proc.stdin.write(line));
-    peer.onNotification = message => this.threadListeners.get(message.params?.threadId)?.(message);
+    peer.onNotification = message => message.method.startsWith('account/')
+      ? this.onAccount?.(message) : this.threadListeners.get(message.params?.threadId)?.(message);
     this.proc = proc;
     this.peer = peer;
 
@@ -137,6 +139,19 @@ var CodexService = class {
       efforts: m.supportedReasoningEfforts.map(e => e.reasoningEffort),
       defaultEffort: m.defaultReasoningEffort
     }));
+  }
+
+  // The signed-in account, or null when codex needs a ChatGPT login (a custom provider that
+  // needs no OpenAI auth counts as signed in). Logins are stored in ~/.codex, shared with the CLI.
+  async account() {
+    const { account, requiresOpenaiAuth } = await this.request('account/read', {});
+    return account || (requiresOpenaiAuth ? null : {});
+  }
+
+  // Starts the ChatGPT browser login; codex listens on localhost for the redirect and sends
+  // account/login/completed when it is done.
+  login() {
+    return this.request('account/login/start', { type: 'chatgpt' });
   }
 
   interrupt(threadId, turnId) {

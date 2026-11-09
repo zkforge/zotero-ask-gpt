@@ -38,6 +38,7 @@ Zotero 进程（插件，特权 JS）
 4. `turn/start` { threadId, input: [{ type: "text", text, text_elements: [] }] }，按偏好设置附带 `model` / `effort`。
 5. 接收通知：`item/agentMessage/delta`（流式文本）、`turn/completed`、`error`；停止生成用 `turn/interrupt`。
 6. 模型列表：`model/list`。
+7. 登录：`account/read` 返回当前账号；`account` 为空且 `requiresOpenaiAuth` 时需要登录（不需要 OpenAI 认证的自定义 provider 视为已登录）。`account/login/start` { type: "chatgpt" } 返回 `authUrl`，用系统浏览器打开；codex 在本机端口等待回调，完成后发 `account/login/completed` { success, error }，账号变化时发 `account/updated`。登录保存在 `~/.codex`，和终端里的 codex 共用。
 
 所有参数类型都可以用 `codex app-server generate-ts --out <dir>` 生成后对照。协议标注为 experimental，因此：启动时检查 codex 版本，低于 `CodexService.MIN_VERSION`（0.167.0，已验证的最低版本）就提示升级；codex 用 -32600「Invalid request: unknown variant / missing field …」拒绝请求时（接口改了），改报「当前 codex 不接受 Ask GPT 的 X 请求」。codex 对未知参数会静默接受。codex 升级后跑一遍自测。
 
@@ -82,6 +83,7 @@ Zotero 进程（插件，特权 JS）
 - 附加论文的引用使用 `paper:<libraryID>/<attachmentKey>/<page>`。点击会打开或切换到目标 PDF，在对应页查找原文短语。存为笔记时，跨论文引用也会转换为 `zotero://open-pdf` 链接。
 - 存为笔记：每条回答下有「存为笔记」。聊天页把这一轮问答渲染成笔记 HTML：标题是问题，引用放进 blockquote，正文由第二个 marked 实例生成，公式写成笔记编辑器的 `<span class="math">$…$</span>` 和 `<pre class="math">$$…$$</pre>`，页码引用写成 `page:N` 链接，末尾注明模型和时间。插件把 `page:N` 换成 `zotero://open-pdf/<库前缀>/items/<附件 key>?page=N`，作为论文父条目的子笔记保存（PDF 没有父条目时存为独立笔记），并把笔记 key 记在这条消息上。之后按钮变成「查看笔记」，用 `ZoteroPane.openNoteWindow` 在新窗口打开；笔记已被删除时恢复成「存为笔记」。
 - 安全：聊天页是 chrome 特权页面，模型输出不能变成可执行的标记。原始 HTML 一律转义；链接只保留 http(s)，并用 `Zotero.launchURL` 在系统浏览器打开；图片只显示替代文字。
+- 登录：codex 启动时（侧栏加载模型列表时）和每次展开侧栏时读一次 `account/read`，在所有侧栏共享。需要登录时输入区上方显示卡片（「登录 ChatGPT 后才能提问」）和「登录」按钮，发送和快捷提问都不可用；点「登录」后卡片改为「正在浏览器中登录」（按钮变成「重新打开」，再次发起登录），收到 `account/login/completed` 后重新读账号，成功则卡片消失，失败则显示 codex 给的原因。提问时 codex 报 401（`unauthorized`，或连接错误带 `httpStatusCode: 401`）时，不等 codex 重试五次，立即停止这轮回答，回答显示「没有登录 ChatGPT，或登录已过期」，并把账号标为未登录，显示登录卡片。
 - 输入区：引用卡片（解释 / 翻译 / 移除）、多行输入框（Enter 发送，Shift+Enter 换行，输入法组字时不发送），下方是模型和推理强度选择（存在偏好设置里，「默认」表示跟随 `~/.codex/config.toml`）。
 - 快捷键：`⌘⇧G` 开关侧栏；有选区时改为引用选区。
 
@@ -89,7 +91,7 @@ Zotero 进程（插件，特权 JS）
 
 用 `Zotero.PreferencePanes.register` 在 Zotero 设置窗口里注册「Ask GPT」面板（`content/prefs.xhtml` / `prefs.js` / `prefs.css`）。
 
-- 连接：codex 路径、代理（留空则自动检测，占位符显示检测结果），「测试连接」会重启 codex，报告 codex 版本和可用模型数。
+- 连接：codex 路径、代理（留空则自动检测，占位符显示检测结果），「测试连接」会重启 codex，报告 codex 版本、可用模型数和登录的账号（邮箱和套餐）；没有登录时标红并提示去侧栏登录。
 - 回答：回答语言（跟随提问 / 中文 / English，作为一行 developer instruction 加在新会话上），阅读助手提示词（默认内容可编辑，「恢复默认」清空偏好）。
 - 快捷提问：常用问题，每行一个（偏好 `prompts`，为空时用内置列表，同样有「恢复默认」）。输入栏的闪电按钮打开列表，点一项直接发送，连同输入区里的引用、截图和附加论文；输入框里已经打的字保留。列表里也能直接编辑：悬停一项点 × 移除（只剩一条时不能移除，因为空列表表示内置列表），底部一行输入回车添加，新加的排在最前（重复的移到最前），改动写回同一个偏好，所有侧栏的空对话建议随之更新。
 - 阅读器：打开 PDF 时显示侧栏（即侧栏开关状态 `open`），选中文字时显示「问 AI」按钮。

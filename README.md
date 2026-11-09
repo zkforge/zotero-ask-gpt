@@ -12,7 +12,7 @@ Zotero 的 PDF 问答插件。通过本机的 Codex CLI 提问，支持引用原
 
 需要 Zotero 10.x 和 Codex CLI ≥ 0.167.0。目前只在 macOS 上测试过。
 
-1. [安装 Codex CLI](https://github.com/openai/codex#installing-and-running-codex-cli)，在终端运行 `codex`，用 ChatGPT 账号登录。
+1. [安装 Codex CLI](https://github.com/openai/codex#installing-and-running-codex-cli)。ChatGPT 账号可以第一次打开侧栏时点「登录」在浏览器里登录，也可以在终端运行 `codex` 登录，两边共用同一个登录。
 2. [下载最新版 `.xpi`](https://github.com/zkforge/zotero-ask-gpt/releases/latest/download/zotero-ask-gpt.xpi)。
 3. 在 Zotero 中打开「工具 → 插件」，把 `.xpi` 拖进插件窗口，重启 Zotero。
 

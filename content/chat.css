@@ -372,6 +372,32 @@ textarea:focus, textarea:focus-visible { outline: none; box-shadow: none; }
 .thumb .remove svg { width: 11px; height: 11px; stroke-width: 2; }
 .input-error { margin: 8px 12px 0; color: var(--danger); font-size: 12px; }
 .input-error[hidden] { display: none; }
+.login-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 8px 0;
+  padding: 9px 10px 9px 12px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+}
+.login-card[hidden] { display: none; }
+.login-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+#login-title { font-size: 13px; font-weight: 500; }
+#login-detail { color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+#login-detail.error { color: var(--danger); }
+.login-button {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.login-button:hover { background: var(--accent-hover); }
 .msg-images { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-bottom: 6px; }
 .msg-images.single { grid-template-columns: minmax(0, 1fr); }
 .msg-image {

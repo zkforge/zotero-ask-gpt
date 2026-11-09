@@ -8,6 +8,7 @@ const menu = $('menu');
 const modelButton = $('model-button');
 let busy = false;
 let hasQuote = false;
+let loggedOut = false;
 
 const ICONS = {
   copy: '<rect x="5.5" y="5.5" width="7" height="7" rx="1.5"/><path d="M10.5 5.5V4.5A1 1 0 0 0 9.5 3.5h-5a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h1"/>',
@@ -44,13 +45,13 @@ function locateFrom(node) {
 function autosize() {
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, 220) + 'px';
-  send.disabled = !busy && !hasQuote && !input.value.trim();
+  send.disabled = !busy && (loggedOut || (!hasQuote && !input.value.trim()));
 }
 
 // Sends the input, or a quick prompt given as `text`, which leaves a half-typed input alone.
 function submit(text = input.value) {
   if (busy) { window.host?.stop(); return; }
-  if (!text.trim() && !hasQuote) return;
+  if (loggedOut || (!text.trim() && !hasQuote)) return;
   if (text === input.value) {
     input.value = '';
     autosize();
@@ -259,6 +260,14 @@ window.render = (conv, paperTexts = new Map()) => {
     thumb.append(remove);
     return thumb;
   }));
+  // ChatGPT login: asking is blocked until codex has an account.
+  const { account, login } = window.host?.account?.() || {};
+  loggedOut = account === null;
+  $('login-card').hidden = !loggedOut;
+  $('login-title').textContent = login?.pending ? '正在浏览器中登录 ChatGPT' : '登录 ChatGPT 后才能提问';
+  $('login-detail').textContent = login?.pending ? '完成后会自动回到这里。' : login?.error ? `登录失败：${login.error}` : '将在浏览器中打开登录页。';
+  $('login-detail').classList.toggle('error', !!login?.error && !login?.pending);
+  $('login-button').textContent = login?.pending ? '重新打开' : '登录';
   $('input-error').hidden = !conv.inputError;
   $('input-error').textContent = conv.inputError || '';
   // A question that was not sent comes back once, unless the user has typed something since.
@@ -338,6 +347,8 @@ window.render = (conv, paperTexts = new Map()) => {
   if (stick) messages.scrollTop = messages.scrollHeight;
   autosize();
 };
+
+$('login-button').addEventListener('click', () => window.host?.login());
 
 window.focusInput = () => input.focus();
 

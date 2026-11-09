@@ -39,6 +39,18 @@
   </groupbox>
 
   <groupbox>
+    <label><html:h2>快捷提问</html:h2></label>
+    <vbox class="field stacked">
+      <hbox align="center">
+        <label class="name" value="常用问题，每行一个" flex="1"/>
+        <html:button id="zoteroaichat-prompts-reset" class="link" type="button">恢复默认</html:button>
+      </hbox>
+      <html:textarea id="zoteroaichat-prompts" rows="6" spellcheck="false"/>
+      <html:p class="hint">显示在空对话里，也可以随时点输入框下方的快捷提问按钮使用。有引用、截图或附加论文时，会和它们一起发送。</html:p>
+    </vbox>
+  </groupbox>
+
+  <groupbox>
     <label><html:h2>阅读器</html:h2></label>
     <checkbox label="打开 PDF 时显示侧栏" preference="extensions.zoteroaichat.open" native="true"/>
     <checkbox label="选中文字时显示「问 AI」按钮" preference="extensions.zoteroaichat.selectionButton" native="true"/>

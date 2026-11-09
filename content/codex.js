@@ -102,7 +102,8 @@ var CodexService = class {
   }
 
   // Threads are ephemeral so they stay out of the Codex app's history; the plugin stores
-  // conversations itself and replays them with `history` when a paper is reopened.
+  // conversations itself and replays them with `history` when a paper is reopened. A user
+  // message in `history` may carry `images` as data URLs.
   async startThread(developerInstructions, history = []) {
     const result = await this.request('thread/start', {
       ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never',
@@ -112,7 +113,7 @@ var CodexService = class {
     });
     const threadId = result.thread.id;
     const items = history.filter(m => m.text).map(m => m.role === 'user'
-      ? { type: 'message', role: 'user', content: [{ type: 'input_text', text: m.text }] }
+      ? { type: 'message', role: 'user', content: [...(m.images || []).map(url => ({ type: 'input_image', image_url: url })), { type: 'input_text', text: m.text }] }
       : { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: m.text }] });
     if (items.length) await this.request('thread/inject_items', { threadId, items });
     return threadId;

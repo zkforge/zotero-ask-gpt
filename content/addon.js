@@ -15,7 +15,7 @@ var AIChatAddon = class {
     const defaults = Services.prefs.getDefaultBranch('extensions.zoteroaichat.');
     defaults.setBoolPref('open', true);
     defaults.setBoolPref('selectionButton', true);
-    for (const [name, value] of [['language', 'auto'], ['codexPath', ''], ['proxy', ''], ['baseInstructions', '']])
+    for (const [name, value] of [['language', 'auto'], ['codexPath', ''], ['proxy', ''], ['baseInstructions', ''], ['prompts', '']])
       defaults.setStringPref(name, value);
     this.prefPaneID = Zotero.PreferencePanes.register({
       pluginID: this.id,
@@ -79,6 +79,16 @@ var AIChatAddon = class {
     return CodexService.BASE_INSTRUCTIONS;
   }
 
+  defaultPrompts() {
+    return AIChatAddon.DEFAULT_PROMPTS;
+  }
+
+  // Quick prompts, one per line in the settings; an empty setting means the built-in list.
+  prompts() {
+    const lines = (Zotero.Prefs.get('extensions.zoteroaichat.prompts', true) || '').split('\n').map(line => line.trim()).filter(Boolean);
+    return lines.length ? lines : AIChatAddon.DEFAULT_PROMPTS;
+  }
+
   // Drop every idle conversation's codex thread, so the next message starts a new one under
   // the current settings (stored history is replayed into it).
   resetThreads() {
@@ -116,8 +126,17 @@ var AIChatAddon = class {
       }
       return [count, bytes];
     };
-    const [conversations, conversationBytes] = await scan('conversations', '.json');
+    const [, conversationBytes] = await scan('conversations', '.json');
     const [images, imageBytes] = await scan('images', '.png');
+    // Each paper's file holds its current conversation and the archived ones.
+    let conversations = 0;
+    const folder = PathUtils.join(dir, 'conversations');
+    for (const child of await IOUtils.exists(folder) ? await IOUtils.getChildren(folder) : []) {
+      if (!child.endsWith('.json')) continue;
+      const data = await IOUtils.readJSON(child).catch(() => ({}));
+      const current = data.version >= 2 ? data.current?.messages : data.messages;
+      conversations += (current?.length ? 1 : 0) + (data.archived?.length || 0);
+    }
     return { dir, conversations, images, bytes: conversationBytes + imageBytes };
   }
 
@@ -128,7 +147,8 @@ var AIChatAddon = class {
 
   // Delete every stored conversation and screenshot (the settings pane confirms first).
   async clearAllData() {
-    for (const itemID of [...this.conversations.keys()]) this.reset(itemID);
+    for (const conv of [...this.conversations.values()])
+      this.replaceConversation(conv, { messages: [], archived: [], quote: null, images: [], papers: [] });
     for (const sub of ['conversations', 'images'])
       await IOUtils.remove(PathUtils.join(this.dataDir(), sub), { recursive: true, ignoreAbsent: true });
   }
@@ -457,7 +477,7 @@ var AIChatAddon = class {
     if (!conv) {
       const item = Zotero.Items.get(itemID);
       const parent = item?.parentItem || item;
-      conv = { itemID, title: parent?.getDisplayTitle() || '未命名文献', threadId: null, turnId: null, busy: false, messages: [], quote: null, notice: '正在读取全文…', noticeLevel: 'loading', status: { state: 'loading' }, instructions: '' };
+      conv = { itemID, title: parent?.getDisplayTitle() || '未命名文献', id: Zotero.Utilities.randomString(8), created: Date.now(), updated: null, archived: [], threadId: null, turnId: null, busy: false, messages: [], quote: null, notice: '正在读取全文…', noticeLevel: 'loading', status: { state: 'loading' }, instructions: '' };
       this.conversations.set(itemID, conv);
       conv.contextReady = this.loadContext(conv);
       conv.restored = this.restore(conv);
@@ -470,16 +490,25 @@ var AIChatAddon = class {
     return PathUtils.join(Zotero.DataDirectory.dir, 'ai-chat', 'conversations', `${item.libraryID}-${item.key}.json`);
   }
 
+  // One file per paper: the current conversation and the archived ones, newest first.
+  // Version 1 files held only the current conversation's messages.
   async restore(conv) {
     try {
       const path = this.storePath(conv.itemID);
       if (!(await IOUtils.exists(path))) return;
-      const { messages } = await IOUtils.readJSON(path);
-      if (!conv.messages.length && Array.isArray(messages)) {
-        // Older saves kept a single `image` per message.
-        conv.messages = messages.map(({ image, ...m }) => image && !m.images ? { ...m, images: [image] } : m);
-        this.changed(conv);
-      }
+      const data = await IOUtils.readJSON(path);
+      if (conv.messages.length) return;
+      // Older saves kept a single `image` per message.
+      const upgrade = messages => (Array.isArray(messages) ? messages : []).map(({ image, ...m }) => image && !m.images ? { ...m, images: [image] } : m);
+      // Version 1 kept no times; the file was written after the last reply.
+      const written = data.version >= 2 ? null : (await IOUtils.stat(path)).lastModified;
+      const current = data.version >= 2 ? data.current : { messages: data.messages, created: written, updated: written };
+      Object.assign(conv, {
+        id: current?.id || conv.id, created: current?.created || conv.created, updated: current?.updated || null,
+        messages: upgrade(current?.messages),
+        archived: (data.archived || []).map(entry => ({ ...entry, messages: upgrade(entry.messages) }))
+      });
+      this.changed(conv);
     } catch (error) {
       Zotero.logError(error);
     }
@@ -488,24 +517,24 @@ var AIChatAddon = class {
   async save(conv) {
     try {
       const path = this.storePath(conv.itemID);
-      if (!conv.messages.length) {
+      if (!conv.messages.length && !conv.archived.length) {
         await IOUtils.remove(path, { ignoreAbsent: true });
         return;
       }
       await IOUtils.makeDirectory(PathUtils.parent(path), { ignoreExisting: true });
-      const messages = conv.messages.filter(m => !m.pending).map(({ role, text, quote, images, papers, error, note }) => ({ role, text, quote, images, papers, error, note }));
-      await IOUtils.writeJSON(path, { version: 1, messages }, { tmpPath: path + '.tmp' });
+      const current = { id: conv.id, created: conv.created, updated: conv.updated, messages: AIChatAddon.stored(conv.messages) };
+      await IOUtils.writeJSON(path, { version: 2, current, archived: conv.archived }, { tmpPath: path + '.tmp' });
     } catch (error) {
       Zotero.logError(error);
     }
   }
 
   // The text codex sees for a user message, with the quoted passage inlined.
-  // An attached image is sent as a local image with the turn; in replayed history only a
-  // note that it was there survives. An added paper's full text goes in only with the first
-  // message that carries it (`earlier` are the messages before this one), since the thread
-  // or the replayed history already holds it after that.
-  promptFor(message, { replay = false, earlier = [] } = {}) {
+  // Attached images are sent with the message as local images, or as data URLs when it is
+  // replayed (`replayed` are the ones whose files still exist). An added paper's full text
+  // goes in only with the first message that carries it (`earlier` are the messages before
+  // this one), since the thread or the replayed history already holds it after that.
+  promptFor(message, { replay = false, replayed = [], earlier = [] } = {}) {
     const { quote, images = [], papers = [], text } = message;
     const parts = [];
     const sent = new Set(earlier.flatMap(m => (m.papers || []).map(p => `${p.libraryID}/${p.attachmentKey}`)));
@@ -524,12 +553,13 @@ var AIChatAddon = class {
         cached?.body ? `Full text, with [p.N] marking the start of PDF page N:\n\n${cached.body}` : '(Its full text could not be extracted; only the metadata above is available.)'
       ].join('\n'));
     }
-    if (images.length) {
-      const where = images.map((image, i) => `image ${i + 1}${image.page ? ` from p. ${image.page}` : ''}`).join(', ');
-      parts.push(replay
-        ? `[${images.length} image(s) cropped from the PDF were attached here (${where}); they are no longer available.]`
-        : `[Attached ${images.length} image(s) cropped from the PDF, in order: ${where}.]`);
+    const attached = replay ? replayed : images;
+    if (attached.length) {
+      const where = attached.map((image, i) => `image ${i + 1}${image.page ? ` from p. ${image.page}` : ''}`).join(', ');
+      parts.push(`[Attached ${attached.length} image(s) cropped from the PDF, in order: ${where}.]`);
     }
+    if (images.length > attached.length)
+      parts.push(`[${images.length - attached.length} more image(s) cropped from the PDF were attached here; they are no longer available.]`);
     if (quote) parts.push(`Quoted passage from the paper${quote.page ? ` (p. ${quote.page})` : ''}:\n"""\n${quote.text}\n"""`);
     parts.push(text);
     return parts.join('\n\n');
@@ -712,7 +742,21 @@ var AIChatAddon = class {
       // Added papers' full text goes into the prompt, including in replayed history.
       await this.loadPapers([...earlier, message].flatMap(m => m.papers || []));
       this.changed(conv);
-      const history = earlier.map((m, i) => ({ role: m.role, text: m.role === 'user' ? this.promptFor(m, { replay: true, earlier: earlier.slice(0, i) }) : m.text }));
+      // Screenshots are replayed from their saved files, so a new thread still sees them.
+      const history = [];
+      for (const [i, m] of earlier.entries()) {
+        if (m.role !== 'user') { history.push({ role: m.role, text: m.text }); continue; }
+        const replayed = [], urls = [];
+        for (const image of m.images || []) {
+          const bytes = await IOUtils.read(image.path).catch(() => null);
+          if (!bytes) continue;
+          let binary = '';
+          for (let at = 0; at < bytes.length; at += 0x8000) binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+          replayed.push(image);
+          urls.push(`data:image/png;base64,${btoa(binary)}`);
+        }
+        history.push({ role: 'user', text: this.promptFor(m, { replay: true, replayed, earlier: earlier.slice(0, i) }), images: urls });
+      }
       const prompt = this.promptFor(message, { earlier: before });
       await conv.contextReady;
       const language = { zh: 'Always reply in Simplified Chinese.', en: 'Always reply in English.' }[Zotero.Prefs.get('extensions.zoteroaichat.language', true)];
@@ -720,8 +764,10 @@ var AIChatAddon = class {
 
       const estimate = AIChatAddon.estimateTokens;
       const contextWindow = conv.usage?.window || this.codex.contextWindow;
-      const needed = conv.threadId ? (conv.usage?.used || 0) + estimate(prompt)
-        : [instructions, ...history.map(m => m.text), prompt].reduce((sum, text) => sum + estimate(text), 0);
+      const imageTokens = count => count * AIChatAddon.IMAGE_TOKENS;
+      const needed = conv.threadId ? (conv.usage?.used || 0) + estimate(prompt) + imageTokens(images.length)
+        : [instructions, ...history.map(m => m.text), prompt].reduce((sum, text) => sum + estimate(text), 0)
+          + imageTokens(images.length + history.reduce((sum, m) => sum + (m.images?.length || 0), 0));
       if (contextWindow && needed > contextWindow * AIChatAddon.CONTEXT_LIMIT) {
         const size = `约 ${Math.round(needed / 1000)}k tokens，模型上下文只有 ${Math.round(contextWindow / 1000)}k`;
         Zotero.debug(`[zoteroaichat] not sending: ${needed} tokens needed, window ${contextWindow}`);
@@ -756,19 +802,60 @@ var AIChatAddon = class {
       this.codex.interrupt(conv.threadId, conv.turnId).catch(error => Zotero.logError(error));
   }
 
-  // Starts a fresh conversation for the paper, reusing the already extracted context.
+  // Replace a paper's conversation state with `fields`, keeping the extracted context and
+  // anything waiting in the input. Any reply in progress is stopped and its thread dropped.
+  replaceConversation(conv, fields) {
+    this.stop(conv.itemID);
+    if (conv.threadId) this.codex.unlisten(conv.threadId);
+    const next = { ...conv, threadId: null, turnId: null, busy: false, usage: null, inputError: null, ...fields };
+    this.conversations.set(conv.itemID, next);
+    this.changed(next);
+    return next;
+  }
+
+  // The current conversation as a history entry, or null when it has nothing to keep.
+  archiveEntry(conv) {
+    const messages = AIChatAddon.stored(conv.messages);
+    return messages.length ? { id: conv.id, created: conv.created, updated: conv.updated || conv.created, messages } : null;
+  }
+
+  // Starts a fresh conversation for the paper; the current one moves to its history.
+  // Screenshots waiting in the input are discarded with their files.
   reset(itemID) {
     const conv = this.conversations.get(itemID);
     if (!conv) return;
-    this.stop(itemID);
-    if (conv.threadId) this.codex.unlisten(conv.threadId);
-    const fresh = { ...conv, threadId: null, turnId: null, busy: false, messages: [], quote: null, images: [], papers: [], usage: null, inputError: null };
-    this.conversations.set(itemID, fresh);
-    this.changed(fresh);
+    const entry = this.archiveEntry(conv);
+    for (const image of conv.images || []) IOUtils.remove(image.path, { ignoreAbsent: true }).catch(error => Zotero.logError(error));
+    const fresh = this.replaceConversation(conv, {
+      id: Zotero.Utilities.randomString(8), created: Date.now(), updated: null, messages: [], quote: null, images: [], papers: [],
+      archived: entry ? [entry, ...conv.archived] : conv.archived
+    });
     this.save(fresh);
-    // Screenshots belong to the conversation; saved notes keep only page links, not the files.
-    const images = [...conv.messages.flatMap(m => m.images || []), ...(conv.images || [])];
-    for (const image of images) IOUtils.remove(image.path, { ignoreAbsent: true }).catch(error => Zotero.logError(error));
+  }
+
+  // Switch to an archived conversation; the current one, if it has messages, is archived.
+  openArchived(itemID, id) {
+    const conv = this.conversations.get(itemID);
+    const entry = conv?.archived.find(e => e.id === id);
+    if (!entry || conv.busy) return;
+    const current = this.archiveEntry(conv);
+    const next = this.replaceConversation(conv, {
+      id: entry.id, created: entry.created, updated: entry.updated, messages: entry.messages,
+      archived: [...(current ? [current] : []), ...conv.archived.filter(e => e !== entry)]
+    });
+    this.save(next);
+  }
+
+  // Permanently delete an archived conversation and its screenshots (the chat confirms first).
+  deleteArchived(itemID, id) {
+    const conv = this.conversations.get(itemID);
+    const entry = conv?.archived.find(e => e.id === id);
+    if (!entry) return;
+    conv.archived = conv.archived.filter(e => e !== entry);
+    this.changed(conv);
+    this.save(conv);
+    for (const image of entry.messages.flatMap(m => m.images || []))
+      IOUtils.remove(image.path, { ignoreAbsent: true }).catch(error => Zotero.logError(error));
   }
 
   finishTurn(conv, error = null) {
@@ -779,6 +866,7 @@ var AIChatAddon = class {
     }
     conv.busy = false;
     conv.turnId = null;
+    conv.updated = Date.now();
     this.changed(conv);
     if (this.conversations.get(conv.itemID) === conv) this.save(conv);
   }
@@ -833,6 +921,18 @@ var AIChatAddon = class {
 
 AIChatAddon.MAX_IMAGES = 6;
 
+// The saved form of a conversation's messages: finished ones, without UI-only fields.
+AIChatAddon.stored = messages => messages.filter(m => !m.pending)
+  .map(({ role, text, quote, images, papers, error, note }) => ({ role, text, quote, images, papers, error, note }));
+
+AIChatAddon.DEFAULT_PROMPTS = [
+  '总结这篇论文的问题、方法和结论',
+  '这篇论文的主要贡献是什么？',
+  '这篇论文有哪些局限？',
+  '列出文中的关键公式，并解释每个符号的含义',
+  '这篇论文和该领域之前的工作相比有什么不同？'
+];
+
 // Each added paper's text is capped lower than the paper being read.
 AIChatAddon.MAX_ATTACHED_CHARS = 200000;
 
@@ -842,6 +942,9 @@ AIChatAddon.estimateTokens = text => {
   const cjk = (text.match(/[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]/g) || []).length;
   return Math.round(cjk + (text.length - cjk) / 4);
 };
+
+// Rough cost of one screenshot, for the context size check.
+AIChatAddon.IMAGE_TOKENS = 1500;
 
 // Share of the context window a question may fill; the token estimate is rough.
 AIChatAddon.CONTEXT_LIMIT = 0.9;

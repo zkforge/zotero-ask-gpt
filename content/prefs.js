@@ -40,6 +40,19 @@ document.addEventListener('load', event => {
     Zotero.Prefs.set('extensions.zoteroaichat.baseInstructions', '', true);
   });
 
+  // Same pattern for quick prompts: the built-in list is shown until edited.
+  const prompts = $('prompts');
+  const defaultPrompts = addon.defaultPrompts().join('\n');
+  prompts.value = Zotero.Prefs.get('extensions.zoteroaichat.prompts', true) || defaultPrompts;
+  prompts.addEventListener('change', () => {
+    const value = prompts.value.split('\n').map(line => line.trim()).filter(Boolean).join('\n');
+    Zotero.Prefs.set('extensions.zoteroaichat.prompts', value && value !== defaultPrompts ? value : '', true);
+  });
+  $('prompts-reset').addEventListener('click', () => {
+    prompts.value = defaultPrompts;
+    Zotero.Prefs.set('extensions.zoteroaichat.prompts', '', true);
+  });
+
   const refreshUsage = async () => {
     const { dir, conversations, images, bytes } = await addon.storageUsage();
     $('data-path').textContent = dir;

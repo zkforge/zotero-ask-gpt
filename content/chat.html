@@ -16,12 +16,16 @@
     <button id="settings" class="icon" title="Ask GPT 设置" aria-label="Ask GPT 设置">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h6M11.5 4.5h2M2.5 11.5h2M7.5 11.5h6"/><circle cx="10" cy="4.5" r="1.5"/><circle cx="6" cy="11.5" r="1.5"/></svg>
     </button>
-    <button id="reset" class="icon" title="新对话" aria-label="新对话">
+    <button id="history" class="icon" title="历史对话" aria-label="历史对话" aria-haspopup="menu" aria-expanded="false" hidden>
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v3l2 1.5"/></svg>
+    </button>
+    <button id="reset" class="icon" title="新对话（当前对话保存在历史里）" aria-label="新对话">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg>
     </button>
     <button id="close" class="icon" title="收起侧栏 (⌘⇧G)" aria-label="收起侧栏">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
     </button>
+    <div id="history-menu" class="menu-card history-menu" role="menu" hidden></div>
   </header>
 
   <main id="messages" aria-live="polite"></main>
@@ -50,6 +54,9 @@
         </button>
         <button id="capture" class="icon tool" title="截图提问：在 PDF 上框选图表或公式" aria-label="截图提问">
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5.5v-2a1 1 0 0 1 1-1h2M10.5 2.5h2a1 1 0 0 1 1 1v2M13.5 10.5v2a1 1 0 0 1-1 1h-2M5.5 13.5h-2a1 1 0 0 1-1-1v-2"/><circle cx="8" cy="8" r="2"/></svg>
+        </button>
+        <button id="prompts-button" class="icon tool" title="快捷提问" aria-label="快捷提问" aria-haspopup="menu" aria-expanded="false">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 2.5 4 9h4l-1 4.5L12 7H8z"/></svg>
         </button>
         <button id="model-button" class="picker-button" hidden aria-haspopup="menu" aria-expanded="false" title="模型"></button>
         <button id="effort-button" class="picker-button effort" hidden aria-haspopup="menu" aria-expanded="false" title="思考强度"></button>

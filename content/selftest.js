@@ -1,7 +1,7 @@
 // Development self-test, loaded by bootstrap.js only when the pref
 // extensions.zoteroaichat.devSelfTest is set. Results go to the Zotero debug log
 // ([zoteroaichat] self-test …). Modes: true (full: citations through the model),
-// "nav", "limits", "note", "image", "prefs" — see docs/design.md.
+// "nav", "limits", "history", "note", "image", "prefs" — see docs/design.md.
 async function runSelfTest(addon) {
   try {
     let reader = null;
@@ -61,6 +61,54 @@ async function runSelfTest(addon) {
       const restored = addon.conversation(itemID);
       await Promise.all([restored.contextReady, restored.restored]);
       Zotero.debug(`[zoteroaichat] self-test reopen: ${restored.notice}; restored ${restored.messages.length} messages`);
+      return;
+    }
+    if (mode === 'history') {
+      // Archive, switch and delete conversations, read the quick prompts, then check that a
+      // screenshot from replayed history reaches the model (one model call). The paper's
+      // real conversations are put back afterwards.
+      const itemID = reader.itemID;
+      const original = { id: conv.id, created: conv.created, messages: conv.messages, archived: conv.archived };
+      const current = () => addon.conversations.get(itemID);
+      const file = async () => {
+        const data = await IOUtils.readJSON(addon.storePath(itemID));
+        return `v${data.version} current=${data.current?.messages.length} archived=${data.archived?.length}`;
+      };
+      addon.replaceConversation(conv, { messages: [{ role: 'user', text: 'self-test A' }, { role: 'assistant', text: 'A' }], archived: [] });
+      addon.reset(itemID);
+      await Zotero.Promise.delay(300);
+      const archivedID = current().archived[0]?.id;
+      Zotero.debug(`[zoteroaichat] self-test history reset: current=${current().messages.length} archived=${current().archived.length} file ${await file()}`);
+      current().messages = [{ role: 'user', text: 'self-test B' }, { role: 'assistant', text: 'B' }];
+      addon.openArchived(itemID, archivedID);
+      await Zotero.Promise.delay(300);
+      Zotero.debug(`[zoteroaichat] self-test history open: current="${current().messages[0]?.text}" archived=${current().archived.map(e => e.messages[0].text).join(',')} file ${await file()}`);
+      addon.deleteArchived(itemID, current().archived[0].id);
+      await Zotero.Promise.delay(300);
+      Zotero.debug(`[zoteroaichat] self-test history delete: archived=${current().archived.length} file ${await file()}`);
+
+      const saved = Zotero.Prefs.get('extensions.zoteroaichat.prompts', true);
+      const defaults = addon.prompts().length;
+      Zotero.Prefs.set('extensions.zoteroaichat.prompts', ' One \n\nTwo ', true);
+      Zotero.debug(`[zoteroaichat] self-test prompts: default ${defaults}, custom ${JSON.stringify(addon.prompts())}`);
+      Zotero.Prefs.set('extensions.zoteroaichat.prompts', saved, true);
+
+      const win = reader._internalReader._primaryView._iframeWindow;
+      const canvas = [...win.document.querySelectorAll('.page .canvasWrapper canvas')]
+        .find(c => { const r = c.getBoundingClientRect(); return r.bottom > 0 && r.top < win.innerHeight; });
+      const r = canvas.getBoundingClientRect();
+      const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, win.innerHeight);
+      const image = await addon.cropRegion(reader, { left: r.left + r.width * 0.1, right: r.right - r.width * 0.1, top: top + (bottom - top) * 0.2, bottom: top + (bottom - top) * 0.6 });
+      addon.replaceConversation(current(), {
+        messages: [{ role: 'user', text: 'Keep this image in mind.', images: [image] }, { role: 'assistant', text: 'OK.' }], archived: []
+      });
+      // The paper's text is in context too, so ask for something only the crop shows: where it starts.
+      await addon.send(itemID, 'Self-test: did I send you an image earlier in this conversation? Answer yes or no, then quote exactly the first line of text visible at the very top of that image.');
+      while (current().busy) await Zotero.Promise.delay(300);
+      const reply = current().messages.at(-1);
+      Zotero.debug(`[zoteroaichat] self-test history replay (image p.${image.page}): ${reply.error || reply.text}`);
+      await IOUtils.remove(image.path, { ignoreAbsent: true });
+      addon.save(addon.replaceConversation(current(), original));
       return;
     }
     if (mode === 'rerun') {

@@ -19,7 +19,6 @@ const ICONS = {
   close: '<path d="M5 5l6 6M11 5l-6 6"/>'
 };
 const icon = (name, className = '') => `<svg class="${className}" viewBox="0 0 16 16" aria-hidden="true">${ICONS[name]}</svg>`;
-const SUGGESTIONS = ['总结这篇论文的问题、方法和结论', '这篇论文的主要贡献是什么？', '这篇论文有哪些局限？'];
 const EFFORTS = {
   minimal: ['极低', '几乎不推理，最快'],
   low: ['低', '响应快，推理较轻'],
@@ -47,11 +46,14 @@ function autosize() {
   send.disabled = !busy && !hasQuote && !input.value.trim();
 }
 
+// Sends the input, or a quick prompt given as `text`, which leaves a half-typed input alone.
 function submit(text = input.value) {
   if (busy) { window.host?.stop(); return; }
   if (!text.trim() && !hasQuote) return;
-  input.value = '';
-  autosize();
+  if (text === input.value) {
+    input.value = '';
+    autosize();
+  }
   window.host?.send(text);
 }
 
@@ -223,7 +225,7 @@ const renderedMessages = new WeakMap();
 const restoredDrafts = new WeakSet();
 
 window.render = (conv, paperTexts = new Map()) => {
-  if (lastConv && lastConv.itemID !== conv.itemID) closePaperMenu();
+  if (lastConv && lastConv.itemID !== conv.itemID) { closePaperMenu(); closeHistory(); }
   lastConv = conv;
   lastPaperTexts = paperTexts;
   $('title').textContent = conv.title;
@@ -233,6 +235,8 @@ window.render = (conv, paperTexts = new Map()) => {
   send.classList.toggle('stop', busy);
   send.title = busy ? '停止生成' : '发送';
   send.setAttribute('aria-label', send.title);
+  historyButton.hidden = !conv.archived?.length;
+  if (!historyMenu.hidden && (historyShown.archived !== conv.archived || historyShown.busy !== busy)) renderHistory();
 
   const images = conv.images || [];
   $('image-card').hidden = !images.length;
@@ -297,7 +301,7 @@ window.render = (conv, paperTexts = new Map()) => {
     const empty = element('div', 'empty');
     const title = element('h2', 'greeting', greeting());
     const list = element('div', 'suggestions');
-    for (const text of SUGGESTIONS) {
+    for (const text of (window.host?.prompts() || []).slice(0, 3)) {
       const chip = element('button', 'suggestion', text);
       chip.addEventListener('click', () => submit(text));
       list.append(chip);
@@ -332,9 +336,11 @@ window.render = (conv, paperTexts = new Map()) => {
 
 window.focusInput = () => input.focus();
 
-// Model and effort pickers: two buttons, each opening its own card above it.
+// Quick prompts and the model and effort pickers: buttons in the input bar, each opening the
+// shared menu card above it.
 
 const effortButton = $('effort-button');
+const menuButtons = { prompts: $('prompts-button'), model: modelButton, effort: effortButton };
 const picker = { models: [], model: '', effort: '', open: null };
 const effortLabel = effort => EFFORTS[effort]?.[0] || effort;
 
@@ -373,9 +379,18 @@ function menuItem({ name, tag, key, checked, onClick }) {
 
 function openMenu(kind) {
   closePaperMenu();
-  const button = kind === 'model' ? modelButton : effortButton;
+  const button = menuButtons[kind];
   const list = element('div', 'menu-list');
-  if (kind === 'model') {
+  if (kind === 'prompts') {
+    list.append(...(window.host?.prompts() || []).map(text => {
+      const item = menuItem({ name: text, onClick: () => { closeMenu(); if (!busy) submit(text); } });
+      item.setAttribute('role', 'menuitem');
+      item.removeAttribute('aria-checked');
+      item.title = text;
+      return item;
+    }));
+    menu.replaceChildren(element('div', 'menu-label', '快捷提问'), list);
+  } else if (kind === 'model') {
     list.append(...picker.models.map((model, i) => menuItem({
       name: model.name, key: i < 9 ? String(i + 1) : '', checked: model.id === picker.model,
       onClick: () => choose(model.id, picker.effort)
@@ -391,11 +406,11 @@ function openMenu(kind) {
   }
   picker.open = kind;
   menu.hidden = false;
-  modelButton.setAttribute('aria-expanded', String(kind === 'model'));
-  effortButton.setAttribute('aria-expanded', String(kind === 'effort'));
-  // Right-align the card with its button, kept inside the composer.
+  for (const [name, other] of Object.entries(menuButtons)) other.setAttribute('aria-expanded', String(name === kind));
+  // Align the card with its button (left edge for the prompts button on the left, right
+  // edge for the pickers on the right), kept inside the composer.
   const composerWidth = menu.offsetParent.clientWidth;
-  const left = button.offsetLeft + button.offsetWidth - menu.offsetWidth;
+  const left = kind === 'prompts' ? button.offsetLeft : button.offsetLeft + button.offsetWidth - menu.offsetWidth;
   menu.style.left = Math.max(0, Math.min(left, composerWidth - menu.offsetWidth)) + 'px';
   const selected = list.querySelector('[aria-checked="true"]') || list.querySelector('.menu-item');
   selected?.scrollIntoView({ block: 'nearest' });
@@ -405,8 +420,7 @@ function openMenu(kind) {
 function closeMenu() {
   picker.open = null;
   menu.hidden = true;
-  modelButton.setAttribute('aria-expanded', 'false');
-  effortButton.setAttribute('aria-expanded', 'false');
+  for (const button of Object.values(menuButtons)) button.setAttribute('aria-expanded', 'false');
 }
 
 async function loadModels() {
@@ -418,7 +432,7 @@ async function loadModels() {
   }
 }
 
-for (const [button, kind] of [[modelButton, 'model'], [effortButton, 'effort']]) {
+for (const [kind, button] of Object.entries(menuButtons)) {
   button.addEventListener('click', event => {
     event.stopPropagation();
     if (picker.open === kind) closeMenu(); else openMenu(kind);
@@ -432,7 +446,7 @@ document.addEventListener('keydown', event => {
   if (menu.hidden) return;
   if (event.key === 'Escape') {
     event.preventDefault();
-    const button = picker.open === 'model' ? modelButton : effortButton;
+    const button = menuButtons[picker.open];
     closeMenu();
     button.focus();
   } else if (picker.open === 'model' && /^[1-9]$/.test(event.key)) {
@@ -567,6 +581,95 @@ $('capture').addEventListener('click', () => window.host?.capture());
 for (const button of document.querySelectorAll('[data-prompt]'))
   button.addEventListener('click', () => submit(button.dataset.prompt));
 $('reset').addEventListener('click', () => window.host?.reset());
+
+// History: this paper's earlier conversations, newest first ---------------------
+
+const historyButton = $('history');
+const historyMenu = $('history-menu');
+const historyShown = { archived: null, busy: false };
+
+function historyTime(time) {
+  const date = new Date(time);
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) return `今天 ${date.toTimeString().slice(0, 5)}`;
+  const day = `${date.getMonth() + 1}月${date.getDate()}日`;
+  return date.getFullYear() === now.getFullYear() ? day : `${date.getFullYear()}年${day}`;
+}
+
+function renderHistory() {
+  const entries = lastConv?.archived || [];
+  Object.assign(historyShown, { archived: lastConv?.archived, busy });
+  if (!entries.length) { closeHistory(); return; }
+  const list = element('div', 'menu-list');
+  for (const entry of entries) {
+    const row = element('div', 'history-entry');
+    const open = element('button', 'open');
+    open.setAttribute('role', 'menuitem');
+    const question = entry.messages.find(m => m.role === 'user')?.text || '（空对话）';
+    const rounds = entry.messages.filter(m => m.role === 'user').length;
+    open.append(element('span', 'title', question), element('span', 'meta', `${historyTime(entry.updated || entry.created)} · ${rounds} 轮`));
+    open.title = question;
+    open.disabled = busy;
+    open.addEventListener('click', event => {
+      event.stopPropagation();
+      closeHistory();
+      window.host?.openArchived(entry.id);
+    });
+    // Deleting is permanent, so the first click only asks.
+    const remove = element('button', 'icon small delete');
+    remove.innerHTML = icon('close');
+    remove.title = '删除这段对话';
+    remove.setAttribute('aria-label', remove.title);
+    remove.addEventListener('click', event => {
+      event.stopPropagation();
+      if (remove.classList.contains('confirm')) { window.host?.deleteArchived(entry.id); return; }
+      remove.classList.add('confirm');
+      remove.textContent = '删除';
+      remove.title = '再点一次永久删除这段对话和其中的截图';
+    });
+    row.append(open, remove);
+    list.append(row);
+  }
+  historyMenu.replaceChildren(element('div', 'menu-label', busy ? '回答生成中，完成后才能切换' : '这篇论文的历史对话'), list);
+}
+
+function openHistory() {
+  if (!lastConv?.archived?.length) return;
+  closeMenu();
+  closePaperMenu();
+  renderHistory();
+  historyMenu.hidden = false;
+  historyButton.setAttribute('aria-expanded', 'true');
+  historyMenu.querySelector('.open:not(:disabled)')?.focus();
+}
+
+// The list is rebuilt on every open, so it is cleared here and can never show another paper's.
+function closeHistory() {
+  historyMenu.replaceChildren();
+  historyMenu.hidden = true;
+  historyButton.setAttribute('aria-expanded', 'false');
+}
+
+historyButton.addEventListener('click', event => {
+  event.stopPropagation();
+  if (historyMenu.hidden) openHistory(); else closeHistory();
+});
+document.addEventListener('click', event => {
+  if (!historyMenu.hidden && !historyMenu.contains(event.target)) closeHistory();
+});
+document.addEventListener('keydown', event => {
+  if (historyMenu.hidden) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeHistory();
+    historyButton.focus();
+  } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    const items = [...historyMenu.querySelectorAll('.open:not(:disabled)')];
+    const next = items[(items.indexOf(document.activeElement) + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length];
+    event.preventDefault();
+    next?.focus();
+  }
+});
 $('settings').addEventListener('click', () => window.host?.openSettings());
 $('close').addEventListener('click', () => window.host?.close());
 window.addEventListener('error', event => window.host?.logError(event.error || event.message));
